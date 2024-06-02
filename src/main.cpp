@@ -125,7 +125,7 @@ void checkConnections() {
     }
     if (!SinricPro.isConnected()) {
         Serial.println("SinricPro disconnected, reconnecting...");
-        setupSinricPro();
+        // setupSinricPro();
     } else {
         Serial.println("SinricPro connected");
     }
