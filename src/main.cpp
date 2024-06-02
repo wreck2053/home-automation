@@ -1,10 +1,12 @@
 #include <Arduino.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <IRsend.h>
 #include <SinricPro.h>
 #include <SinricProSwitch.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <ir_Coolix.h>
 
 #define WIFI_SSID "Rahul"
 #define WIFI_PASS "chennai@123"
@@ -24,6 +26,10 @@ int previousFanState = LOW;
 #define FAN_SWITCH_PIN 13
 #define SWITCH_ID_FAN "6644c9cf6443b9bfe2b9dfb5"
 
+#define IR_TRANSMITTER_PIN 4
+IRsend irsend(IR_TRANSMITTER_PIN);
+IRCoolixAC ac(IR_TRANSMITTER_PIN);
+
 AsyncWebServer server(80);
 
 void setupDevices() {
@@ -32,6 +38,10 @@ void setupDevices() {
     pinMode(LIGHT_SWITCH_PIN, INPUT_PULLUP);
     pinMode(FAN_RELAY_PIN, OUTPUT);
     pinMode(FAN_SWITCH_PIN, INPUT_PULLUP);
+
+    irsend.begin();
+    ac.begin();
+    ac.stateReset();
 }
 
 void setupWiFi() {
@@ -62,7 +72,6 @@ void setupSinricPro() {
     SinricProSwitch& fanSwitch = SinricPro[SWITCH_ID_FAN];
     fanSwitch.onPowerState(onPowerStateFan);
 
-    // setup SinricPro
     SinricPro.onConnected([]() {
         Serial.printf("Connected to SinricPro\r\n");
         digitalWrite(LED_BUILTIN, HIGH);
@@ -79,24 +88,82 @@ void setupSinricPro() {
 void setupServer() {
     // Route for root / web page
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-        request->send(200, "text/html",
-                      "<h1>NodeMCU-32S Server</h1>"
-                      "<button onclick=\"toggleLight()\">Toggle Light</button>"
-                      "<br>"
-                      "<br>"
-                      "<button onclick=\"toggleFan()\">Toggle Fan</button>"
-                      "<script>"
-                      "function toggleLight() {"
-                      "    var xhr = new XMLHttpRequest();"
-                      "    xhr.open('GET', '/toggle-light', true);"
-                      "    xhr.send();"
-                      "}"
-                      "function toggleFan() {"
-                      "    var xhr = new XMLHttpRequest();"
-                      "    xhr.open('GET', '/toggle-fan', true);"
-                      "    xhr.send();"
-                      "}"
-                      "</script>");
+        request->send(
+            200, "text/html",
+            "<h1>NodeMCU-32S Server</h1>"
+            "<button onclick=\"toggleLight()\">Toggle Light</button>"
+            "<br>"
+            "<br>"
+            "<button onclick=\"toggleFan()\">Toggle Fan</button>"
+            "<br>"
+            "<br>"
+            "<h2>AC Control</h2>"
+            "<button onclick=\"sendCommand('/power/on')\">Power On AC</button>"
+            "<button onclick=\"sendCommand('/power/off')\">Power Off "
+            "AC</button>"
+            "<br>"
+            "<h3>Mode</h3>"
+            "<button onclick=\"sendCommand('/mode/cool')\">Cool Mode</button>"
+            "<button onclick=\"sendCommand('/mode/heat')\">Heat Mode</button>"
+            "<br>"
+            "<h3>Fan Speed</h3>"
+            "<button onclick=\"sendCommand('/fan/low')\">Fan Low</button>"
+            "<button onclick=\"sendCommand('/fan/med')\">Fan Medium</button>"
+            "<button onclick=\"sendCommand('/fan/high')\">Fan High</button>"
+            "<br>"
+            "<h3>Temperature</h3>"
+            "<button onclick=\"sendCommand('/temp/up')\">Temp Up</button>"
+            "<button onclick=\"sendCommand('/temp/down')\">Temp Down</button>"
+            "<br>"
+            "<h3>Set Specific Temperature</h3>"
+            "<button onclick=\"sendCommand('/temp/set/17')\">Set Temp 17 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/18')\">Set Temp 18 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/19')\">Set Temp 19 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/20')\">Set Temp 20 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/21')\">Set Temp 21 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/22')\">Set Temp 22 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/23')\">Set Temp 23 "
+            "C</button>"
+
+            "<br>"
+
+            "<button onclick=\"sendCommand('/temp/set/24')\">Set Temp 24 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/25')\">Set Temp 25 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/26')\">Set Temp 26 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/27')\">Set Temp 27 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/28')\">Set Temp 28 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/29')\">Set Temp 29 "
+            "C</button>"
+            "<button onclick=\"sendCommand('/temp/set/30')\">Set Temp 30 "
+            "C</button>"
+            "<script>"
+            "function toggleLight() {"
+            "    var xhr = new XMLHttpRequest();"
+            "    xhr.open('GET', '/toggle-light', true);"
+            "    xhr.send();"
+            "}"
+            "function toggleFan() {"
+            "    var xhr = new XMLHttpRequest();"
+            "    xhr.open('GET', '/toggle-fan', true);"
+            "    xhr.send();"
+            "}"
+            "function sendCommand(command) {"
+            "    var xhr = new XMLHttpRequest();"
+            "    xhr.open('GET', command, true);"
+            "    xhr.send();"
+            "}"
+            "</script>");
     });
 
     // Route to handle Light toggle
@@ -110,6 +177,79 @@ void setupServer() {
         digitalWrite(FAN_RELAY_PIN, !digitalRead(FAN_RELAY_PIN));
         request->send(200, "text/plain", "Fan toggled");
     });
+
+    // Define routes to handle control requests
+    server.on("/power/on", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setPower(true);
+        ac.send();
+        request->send(200, "text/plain", "Power On");
+    });
+
+    server.on("/power/off", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setPower(false);
+        ac.send();
+        request->send(200, "text/plain", "Power Off");
+    });
+
+    server.on("/mode/cool", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setMode(kCoolixCool);
+        ac.send();
+        request->send(200, "text/plain", "Cool Mode");
+    });
+
+    server.on("/mode/heat", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setMode(kCoolixHeat);
+        ac.send();
+        request->send(200, "text/plain", "Heat Mode");
+    });
+
+    server.on("/fan/low", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setFan(kCoolixFanMin);
+        ac.send();
+        request->send(200, "text/plain", "Fan Low");
+    });
+
+    server.on("/fan/med", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setFan(kCoolixFanMed);
+        ac.send();
+        request->send(200, "text/plain", "Fan Medium");
+    });
+
+    server.on("/fan/high", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setFan(kCoolixFanMax);
+        ac.send();
+        request->send(200, "text/plain", "Fan High");
+    });
+
+    server.on("/temp/up", HTTP_GET, [](AsyncWebServerRequest* request) {
+        int temp = ac.getTemp();
+        if (temp < 30) {
+            ac.setTemp(temp + 1);
+            ac.send();
+        }
+        request->send(200, "text/plain", "Temperature Up");
+    });
+
+    server.on("/temp/down", HTTP_GET, [](AsyncWebServerRequest* request) {
+        int temp = ac.getTemp();
+        if (temp > 17) {
+            ac.setTemp(temp - 1);
+            ac.send();
+        }
+        request->send(200, "text/plain", "Temperature Down");
+    });
+
+    // Define routes to set specific temperature
+    for (int temp = 17; temp <= 30; temp++) {
+        String route = "/temp/set/" + String(temp);
+        server.on(
+            route.c_str(), HTTP_GET, [temp](AsyncWebServerRequest* request) {
+                ac.setTemp(temp);
+                ac.send();
+                request->send(200, "text/plain",
+                              "Temperature Set to " + String(temp) + " C");
+            });
+    }
 
     server.begin();
 }
@@ -125,7 +265,6 @@ void checkConnections() {
     }
     if (!SinricPro.isConnected()) {
         Serial.println("SinricPro disconnected, reconnecting...");
-        // setupSinricPro();
     } else {
         Serial.println("SinricPro connected");
     }
@@ -147,7 +286,7 @@ void setup() {
 }
 
 unsigned long lastCheckTime = 0;
-const unsigned long checkInterval = 60000;  // 1 minute
+const unsigned long checkInterval = 60000;
 
 void loop() {
     SinricPro.handle();
