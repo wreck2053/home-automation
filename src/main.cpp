@@ -40,14 +40,6 @@ void setupWiFi() {
 
     Serial.print("\nConnecting to Wi-Fi...");
     WiFi.begin(WIFI_SSID, WIFI_PASS);
-    while (WiFi.status() != WL_CONNECTED) {
-        delay(500);
-        Serial.print(".");
-    }
-    Serial.println("");
-    Serial.println("Wi-Fi connected");
-    Serial.print("IP address: ");
-    Serial.println(WiFi.localIP());
 }
 
 bool onPowerStateLight(const String& deviceId, bool& state) {
@@ -122,6 +114,24 @@ void setupServer() {
     server.begin();
 }
 
+void checkConnections() {
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("Wi-Fi disconnected, reconnecting...");
+        setupWiFi();
+    } else {
+        Serial.println("Wi-Fi connected");
+        Serial.print("IP address: ");
+        Serial.println(WiFi.localIP());
+    }
+    if (!SinricPro.isConnected()) {
+        Serial.println("SinricPro disconnected, reconnecting...");
+        setupSinricPro();
+    } else {
+        Serial.println("SinricPro connected");
+    }
+    Serial.println("-------------------------------------------");
+}
+
 void setup() {
     Serial.begin(9600);
     delay(1000);
@@ -136,6 +146,9 @@ void setup() {
     Serial.println("\nSetup end\n");
 }
 
+unsigned long lastCheckTime = 0;
+const unsigned long checkInterval = 60000;  // 1 minute
+
 void loop() {
     SinricPro.handle();
 
@@ -149,5 +162,11 @@ void loop() {
     if (currentFanState != previousFanState) {
         previousFanState = currentFanState;
         digitalWrite(FAN_RELAY_PIN, currentFanState);
+    }
+
+    unsigned long currentTime = millis();
+    if (currentTime - lastCheckTime >= checkInterval) {
+        lastCheckTime = currentTime;
+        checkConnections();
     }
 }
