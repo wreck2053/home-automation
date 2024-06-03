@@ -191,7 +191,58 @@ void setupServer() {
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
         request->send(
             200, "text/html",
-            "<h1>NodeMCU-32S Server</h1>"
+            "<!DOCTYPE html>"
+            "<html lang=\"en\">"
+            "<head>"
+            "<meta charset=\"UTF-8\">"
+            "<meta name=\"viewport\" content=\"width=device-width, "
+            "initial-scale=1.0\">"
+            "<style>"
+            "body {"
+            "    font-family: Arial, sans-serif;"
+            "    background: linear-gradient(180deg, #000000, #434343);"
+            "    color: #f4f4f9;"
+            "    display: flex;"
+            "    flex-direction: column;"
+            "    align-items: center;"
+            "    justify-content: center;"
+            "    min-height: 100vh;"
+            "    margin: 0;"
+            "    padding: 20px;"
+            "    box-sizing: border-box;"
+            "}"
+            "h1, h2, h3 {"
+            "    color: #f4f4f9;"
+            "}"
+            "button {"
+            "    background-color: #585858;"
+            "    color: white;"
+            "    border: none;"
+            "    padding: 10px 20px;"
+            "    margin: 10px;"
+            "    font-size: 16px;"
+            "    border-radius: 5px;"
+            "    cursor: pointer;"
+            "    transition: background-color 0.3s;"
+            "}"
+            "button:hover {"
+            "    background-color: #757575;"
+            "}"
+            "div.container {"
+            "    text-align: center;"
+            "    background: rgba(255, 255, 255, 0.1);"
+            "    padding: 20px;"
+            "    border-radius: 10px;"
+            "    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);"
+            "    width: 100%;"
+            "    max-width: 500px;"
+            "}"
+            "</style>"
+            "<title>NodeMCU-32S Server</title>"
+            "</head>"
+            "<body>"
+            "<div class=\"container\">"
+            "<h1>My Bedroom</h1>"
             "<button onclick=\"toggleLight()\">Toggle Light</button>"
             "<br>"
             "<br>"
@@ -205,7 +256,6 @@ void setupServer() {
             "<br>"
             "<h3>Mode</h3>"
             "<button onclick=\"sendCommand('/mode/cool')\">Cool Mode</button>"
-            "<button onclick=\"sendCommand('/mode/heat')\">Heat Mode</button>"
             "<br>"
             "<h3>Fan Speed</h3>"
             "<button onclick=\"sendCommand('/fan/low')\">Fan Low</button>"
@@ -231,9 +281,7 @@ void setupServer() {
             "C</button>"
             "<button onclick=\"sendCommand('/temp/set/23')\">Set Temp 23 "
             "C</button>"
-
             "<br>"
-
             "<button onclick=\"sendCommand('/temp/set/24')\">Set Temp 24 "
             "C</button>"
             "<button onclick=\"sendCommand('/temp/set/25')\">Set Temp 25 "
@@ -248,6 +296,7 @@ void setupServer() {
             "C</button>"
             "<button onclick=\"sendCommand('/temp/set/30')\">Set Temp 30 "
             "C</button>"
+            "</div>"
             "<script>"
             "function toggleLight() {"
             "    var xhr = new XMLHttpRequest();"
@@ -264,7 +313,9 @@ void setupServer() {
             "    xhr.open('GET', command, true);"
             "    xhr.send();"
             "}"
-            "</script>");
+            "</script>"
+            "</body>"
+            "</html>");
     });
 
     // Route to handle Light toggle
@@ -282,6 +333,8 @@ void setupServer() {
     // Define routes to handle control requests
     server.on("/power/on", HTTP_GET, [](AsyncWebServerRequest* request) {
         ac.setPower(true);
+        // automatically set to COOL mode when AC is turned on
+        ac.setMode(kCoolixCool);
         ac.send();
         request->send(200, "text/plain", "Power On");
     });
