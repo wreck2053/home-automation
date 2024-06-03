@@ -4,6 +4,7 @@
 #include <IRsend.h>
 #include <SinricPro.h>
 #include <SinricProSwitch.h>
+#include <SinricProWindowAC.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <ir_Coolix.h>
@@ -29,6 +30,7 @@ int previousFanState = LOW;
 #define IR_TRANSMITTER_PIN 4
 IRsend irsend(IR_TRANSMITTER_PIN);
 IRCoolixAC ac(IR_TRANSMITTER_PIN);
+#define AC_ID "665cdc416e1af35935ffafc0"
 
 AsyncWebServer server(80);
 
@@ -64,6 +66,97 @@ bool onPowerStateFan(const String& deviceId, bool& state) {
     return true;
 }
 
+bool onPowerStateAC(const String& deviceId, bool& state) {
+    Serial.printf("AC turned %s\n", state ? "on" : "off");
+    ac.setPower(state ? true : false);
+    // automatically set to COOL mode when AC is turned on
+    if (state) ac.setMode(kCoolixCool);
+    ac.send();
+    return true;
+}
+
+// increase or decrease fan speed
+bool onAdjustRangeValueAC(const String& deviceId, int& rangeValue) {
+    // first set to COOL
+    ac.setMode(kCoolixCool);
+
+    Serial.printf("AC range value changed by %d\n", rangeValue);
+    int fanSpeed = ac.getFan();
+    if (rangeValue > 0) {
+        if (fanSpeed < kCoolixFanMax) {
+            ac.setFan(fanSpeed + 1);
+            ac.send();
+        }
+    } else {
+        if (fanSpeed > kCoolixFanMin) {
+            ac.setFan(fanSpeed - 1);
+            ac.send();
+        }
+    }
+    return true;
+}
+
+// increase or decrease temperature
+bool onAdjustTargetTemperature(const String& deviceId, float& temperature) {
+    Serial.printf("AC target temperature changed by %f\n", temperature);
+    int temp = ac.getTemp();
+    if (temperature > 0) {
+        if (temp < 30) {
+            ac.setTemp(temp + 1);
+            ac.send();
+        }
+    } else {
+        if (temp > 17) {
+            ac.setTemp(temp - 1);
+            ac.send();
+        }
+    }
+    return true;
+}
+
+// fan speeds - low, medium, high
+bool onRangeValue(const String& deviceId, int& rangeValue) {
+    // first set to COOL
+    ac.setMode(kCoolixCool);
+
+    Serial.printf("AC speed set to %d\n", rangeValue);
+    if (rangeValue == 1) {
+        ac.setFan(kCoolixFanMin);
+    } else if (rangeValue == 2) {
+        ac.setFan(kCoolixFanMed);
+    } else if (rangeValue == 3) {
+        ac.setFan(kCoolixFanMax);
+    }
+    ac.send();
+    return true;
+}
+
+// set specific temperature
+bool onTargetTemperature(const String& deviceId, float& temperature) {
+    Serial.printf("AC temperature set to %d\n", (int)temperature);
+    ac.setTemp((int)temperature);
+    ac.send();
+    return true;
+}
+
+// ac mode - cool, heat, auto, dry, fan
+bool onThermostatMode(const String& deviceId, String& mode) {
+    Serial.printf("AC thermostat mode adjusted to %s\n", mode.c_str());
+    if (mode == "COOL") {
+        ac.setMode(kCoolixCool);
+    } else if (mode == "HEAT") {
+        ac.setMode(kCoolixHeat);
+    } else if (mode == "AUTO") {
+        ac.setMode(kCoolixAuto);
+    } else if (mode == "DRY") {
+        ac.setMode(kCoolixDry);
+    } else if (mode == "FAN") {
+        ac.setMode(kCoolixFan);
+    }
+    ac.send();
+    return true;
+}
+
 void setupSinricPro() {
     // add devices and callbacks to SinricPro
     SinricProSwitch& lightSwitch = SinricPro[SWITCH_ID_LIGHT];
@@ -71,6 +164,14 @@ void setupSinricPro() {
 
     SinricProSwitch& fanSwitch = SinricPro[SWITCH_ID_FAN];
     fanSwitch.onPowerState(onPowerStateFan);
+
+    SinricProWindowAC& airConditioner = SinricPro[AC_ID];
+    airConditioner.onPowerState(onPowerStateAC);
+    airConditioner.onAdjustRangeValue(onAdjustRangeValueAC);
+    airConditioner.onAdjustTargetTemperature(onAdjustTargetTemperature);
+    airConditioner.onRangeValue(onRangeValue);
+    airConditioner.onTargetTemperature(onTargetTemperature);
+    airConditioner.onThermostatMode(onThermostatMode);
 
     SinricPro.onConnected([]() {
         Serial.printf("Connected to SinricPro\r\n");
@@ -272,7 +373,7 @@ void checkConnections() {
 }
 
 void setup() {
-    Serial.begin(9600);
+    Serial.begin(115200);
     delay(1000);
 
     Serial.println("\nSetup start\n");
