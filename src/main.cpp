@@ -296,6 +296,14 @@ void setupServer() {
             "C</button>"
             "<button onclick=\"sendCommand('/temp/set/30')\">Set Temp 30 "
             "C</button>"
+
+            "<button onclick=\"sendCommand('/state/swing')\">Swing"
+            "</button>"
+            "<button onclick=\"sendCommand('/state/led')\">Toggle LED"
+            "</button>"
+            "<button onclick=\"sendCommand('/state/turbo')\">Turbo"
+            "</button>"
+
             "</div>"
             "<script>"
             "function toggleLight() {"
@@ -391,6 +399,24 @@ void setupServer() {
             ac.send();
         }
         request->send(200, "text/plain", "Temperature Down");
+    });
+
+    server.on("/state/swing", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setSwing();
+        ac.send();
+        request->send(200, "text/plain", "Swing");
+    });
+
+    server.on("/state/led", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setLed();
+        ac.send();
+        request->send(200, "text/plain", "Toggle LED");
+    });
+
+    server.on("/state/turbo", HTTP_GET, [](AsyncWebServerRequest* request) {
+        ac.setTurbo();
+        ac.send();
+        request->send(200, "text/plain", "Turbo");
     });
 
     // Define routes to set specific temperature
