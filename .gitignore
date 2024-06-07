@@ -3,3 +3,6 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
+mobileApp/ios
+mobileApp/android
+mobileApp/node_modules
