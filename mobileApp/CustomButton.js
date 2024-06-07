@@ -7,7 +7,7 @@ const CustomButton = ({title, onPress, size}) => (
     style={[styles.buttonContainer, {width: size, height: size}]}
     onPress={onPress}>
     <LinearGradient
-      colors={['#6a11cb', '#2575fc']}
+      colors={['#555555', '#AAAAAA']}
       style={styles.button}
       start={{x: 0, y: 0}}
       end={{x: 1, y: 1}}>

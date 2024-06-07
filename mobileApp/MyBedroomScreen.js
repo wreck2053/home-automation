@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, {useState} from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,9 @@ import {
   Modal,
   TouchableOpacity,
   Dimensions,
-} from "react-native";
-import { Slider } from "react-native-elements";
-import CustomButton from "./CustomButton";
+} from 'react-native';
+import {Slider} from 'react-native-elements';
+import CustomButton from './CustomButton';
 
 const MyBedroomScreen = () => {
   const [isTemperatureModalVisible, setTemperatureModalVisible] =
@@ -19,10 +19,10 @@ const MyBedroomScreen = () => {
   const [temperature, setTemperature] = useState(22);
   const [fanSpeed, setFanSpeed] = useState(1);
 
-  const sendCommand = (command) => {
+  const sendCommand = command => {
     fetch(`http://192.168.0.102${command}`)
-      .then((response) => console.log(response))
-      .catch((error) => console.error(error));
+      .then(response => console.log(response))
+      .catch(error => console.error(error));
   };
 
   const toggleTemperatureModal = () => {
@@ -33,11 +33,11 @@ const MyBedroomScreen = () => {
     setFanSpeedModalVisible(!isFanSpeedModalVisible);
   };
 
-  const handleTemperatureChange = (value) => {
+  const handleTemperatureChange = value => {
     setTemperature(value);
   };
 
-  const handleFanSpeedChange = (value) => {
+  const handleFanSpeedChange = value => {
     setFanSpeed(value);
   };
 
@@ -48,13 +48,13 @@ const MyBedroomScreen = () => {
 
   const handleFanSpeedConfirm = () => {
     // sendCommand(`/fan/${Math.round(fanSpeed)}`);
-    if (fanSpeed === 1) sendCommand("/fan/low");
-    else if (fanSpeed === 2) sendCommand("/fan/med");
-    else if (fanSpeed === 3) sendCommand("/fan/high");
+    if (fanSpeed === 1) sendCommand('/fan/low');
+    else if (fanSpeed === 2) sendCommand('/fan/med');
+    else if (fanSpeed === 3) sendCommand('/fan/high');
     toggleFanSpeedModal();
   };
 
-  const { width } = Dimensions.get("window");
+  const {width} = Dimensions.get('window');
   const tileSize = width / 2 - 30;
 
   return (
@@ -66,12 +66,12 @@ const MyBedroomScreen = () => {
             <View style={styles.column}>
               <CustomButton
                 title="Toggle Light"
-                onPress={() => sendCommand("/toggle-light")}
+                onPress={() => sendCommand('/toggle-light')}
                 size={tileSize}
               />
               <CustomButton
                 title="Power On AC"
-                onPress={() => sendCommand("/power/on")}
+                onPress={() => sendCommand('/power/on')}
                 size={tileSize}
               />
               <CustomButton
@@ -81,24 +81,24 @@ const MyBedroomScreen = () => {
               />
               <CustomButton
                 title="Cool Mode"
-                onPress={() => sendCommand("/mode/cool")}
+                onPress={() => sendCommand('/mode/cool')}
                 size={tileSize}
               />
               <CustomButton
                 title="Swing"
-                onPress={() => sendCommand("/state/swing")}
+                onPress={() => sendCommand('/state/swing')}
                 size={tileSize}
               />
             </View>
             <View style={styles.column}>
               <CustomButton
                 title="Toggle Fan"
-                onPress={() => sendCommand("/toggle-fan")}
+                onPress={() => sendCommand('/toggle-fan')}
                 size={tileSize}
               />
               <CustomButton
                 title="Power Off AC"
-                onPress={() => sendCommand("/power/off")}
+                onPress={() => sendCommand('/power/off')}
                 size={tileSize}
               />
               <CustomButton
@@ -108,12 +108,12 @@ const MyBedroomScreen = () => {
               />
               <CustomButton
                 title="Turbo"
-                onPress={() => sendCommand("/state/turbo")}
+                onPress={() => sendCommand('/state/turbo')}
                 size={tileSize}
               />
               <CustomButton
                 title="Toggle LED"
-                onPress={() => sendCommand("/state/led")}
+                onPress={() => sendCommand('/state/led')}
                 size={tileSize}
               />
             </View>
@@ -126,8 +126,7 @@ const MyBedroomScreen = () => {
         animationType="slide"
         transparent={true}
         visible={isTemperatureModalVisible}
-        onRequestClose={toggleTemperatureModal}
-      >
+        onRequestClose={toggleTemperatureModal}>
         <View style={styles.modalContainer}>
           <View style={styles.modalContent}>
             <Text style={styles.modalHeading}>
@@ -139,21 +138,19 @@ const MyBedroomScreen = () => {
               minimumValue={17}
               maximumValue={30}
               step={1}
-              thumbTintColor="#6a11cb"
-              minimumTrackTintColor="#6a11cb"
+              thumbTintColor="#777777"
+              minimumTrackTintColor="#777777"
               maximumTrackTintColor="#000000"
               style={styles.slider}
             />
             <TouchableOpacity
               onPress={handleTemperatureConfirm}
-              style={styles.confirmButton}
-            >
+              style={styles.confirmButton}>
               <Text style={styles.confirmButtonText}>Confirm</Text>
             </TouchableOpacity>
             <TouchableOpacity
               onPress={toggleTemperatureModal}
-              style={styles.closeButton}
-            >
+              style={styles.closeButton}>
               <Text style={styles.closeButtonText}>Close</Text>
             </TouchableOpacity>
           </View>
@@ -165,8 +162,7 @@ const MyBedroomScreen = () => {
         animationType="slide"
         transparent={true}
         visible={isFanSpeedModalVisible}
-        onRequestClose={toggleFanSpeedModal}
-      >
+        onRequestClose={toggleFanSpeedModal}>
         <View style={styles.modalContainer}>
           <View style={styles.modalContent}>
             <Text style={styles.modalHeading}>
@@ -178,21 +174,19 @@ const MyBedroomScreen = () => {
               minimumValue={1}
               maximumValue={3}
               step={1}
-              thumbTintColor="#6a11cb"
-              minimumTrackTintColor="#6a11cb"
+              thumbTintColor="#777777"
+              minimumTrackTintColor="#777777"
               maximumTrackTintColor="#000000"
               style={styles.slider}
             />
             <TouchableOpacity
               onPress={handleFanSpeedConfirm}
-              style={styles.confirmButton}
-            >
+              style={styles.confirmButton}>
               <Text style={styles.confirmButtonText}>Confirm</Text>
             </TouchableOpacity>
             <TouchableOpacity
               onPress={toggleFanSpeedModal}
-              style={styles.closeButton}
-            >
+              style={styles.closeButton}>
               <Text style={styles.closeButtonText}>Close</Text>
             </TouchableOpacity>
           </View>
@@ -205,77 +199,78 @@ const MyBedroomScreen = () => {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: "#434343",
+    backgroundColor: '#434343',
   },
   scrollView: {
     flexGrow: 1,
-    alignItems: "center",
-    justifyContent: "center",
+    alignItems: 'center',
+    justifyContent: 'center',
     padding: 20,
   },
   tilesContainer: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+    flexDirection: 'row',
+    justifyContent: 'space-between',
   },
   column: {
     flex: 1,
   },
   heading1: {
-    color: "#f4f4f9",
+    color: '#f4f4f9',
     fontSize: 28,
-    fontWeight: "bold",
+    fontWeight: 'bold',
     marginBottom: 20,
   },
   modalContainer: {
     flex: 1,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "rgba(0, 0, 0, 0.5)",
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   modalContent: {
-    width: "80%",
-    backgroundColor: "#fff",
+    width: '80%',
+    backgroundColor: '#fff',
     borderRadius: 20,
     padding: 20,
-    alignItems: "center",
-    shadowColor: "#000",
-    shadowOffset: { width: 0, height: 4 },
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: {width: 0, height: 4},
     shadowOpacity: 0.25,
     shadowRadius: 4,
     elevation: 5,
   },
   modalHeading: {
     fontSize: 20,
-    fontWeight: "bold",
+    fontWeight: 'bold',
     marginBottom: 20,
+    color: 'black',
   },
   slider: {
-    width: "100%",
+    width: '100%',
     height: 40,
   },
   confirmButton: {
-    backgroundColor: "#6a11cb",
+    backgroundColor: '#000000',
     paddingVertical: 10,
     paddingHorizontal: 20,
     borderRadius: 10,
     marginTop: 20,
   },
   confirmButtonText: {
-    color: "#fff",
+    color: '#fff',
     fontSize: 16,
-    fontWeight: "bold",
+    fontWeight: 'bold',
   },
   closeButton: {
-    backgroundColor: "#757575",
+    backgroundColor: '#777777',
     paddingVertical: 10,
     paddingHorizontal: 20,
     borderRadius: 10,
     marginTop: 10,
   },
   closeButtonText: {
-    color: "#fff",
+    color: '#fff',
     fontSize: 16,
-    fontWeight: "bold",
+    fontWeight: 'bold',
   },
 });
 
