@@ -28,4 +28,4 @@ This project implements a home automation system using ESP32 microcontroller, a 
 
 ![alt text](demo/image3.png)
 
-<video controls src="demo/video1.mp4" title="Title"></video>
+https://github.com/user-attachments/assets/ce81b5e0-ad6f-4273-9d8d-6daa331f1479
