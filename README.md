@@ -18,4 +18,14 @@ This project implements a home automation system using ESP32 microcontroller, a 
 
 ## Circuit Diagram
 
-`<img>`
+![alt text](demo/image0.png)
+
+## Demo
+
+![alt text](demo/image1.png)
+
+![alt text](demo/image2.png)
+
+![alt text](demo/image3.png)
+
+<video controls src="demo/video1.mp4" title="Title"></video>
