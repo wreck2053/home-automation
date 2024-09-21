@@ -10,7 +10,7 @@
 #include <ir_Coolix.h>
 
 #define WIFI_SSID "Rahul"
-#define WIFI_PASS "chennai@123"
+#define WIFI_PASS "YOUR_PASSWORD"
 
 #define APP_KEY "12fbb630-3465-4e47-a312-7888355266b4"
 #define APP_SECRET                                                  \
