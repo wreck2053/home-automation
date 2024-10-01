@@ -9,8 +9,8 @@
 #include <WiFiClientSecure.h>
 #include <ir_Coolix.h>
 
-#define WIFI_SSID "Rahul"
-#define WIFI_PASS "YOUR_PASSWORD"
+#define WIFI_SSID "YOUR_SSID"
+#define WIFI_PASS "YOUR_PASS"
 
 #define APP_KEY "12fbb630-3465-4e47-a312-7888355266b4"
 #define APP_SECRET                                                  \
@@ -173,15 +173,11 @@ void setupSinricPro() {
     airConditioner.onTargetTemperature(onTargetTemperature);
     airConditioner.onThermostatMode(onThermostatMode);
 
-    SinricPro.onConnected([]() {
-        Serial.printf("Connected to SinricPro\r\n");
-        digitalWrite(LED_BUILTIN, HIGH);
-    });
+    SinricPro.onConnected(
+        []() { Serial.printf("Connected to SinricPro\r\n"); });
 
-    SinricPro.onDisconnected([]() {
-        Serial.printf("Disconnected from SinricPro\r\n");
-        digitalWrite(LED_BUILTIN, LOW);
-    });
+    SinricPro.onDisconnected(
+        []() { Serial.printf("Disconnected from SinricPro\r\n"); });
 
     SinricPro.begin(APP_KEY, APP_SECRET);
 }
@@ -256,6 +252,7 @@ void setupServer() {
             "<br>"
             "<h3>Mode</h3>"
             "<button onclick=\"sendCommand('/mode/cool')\">Cool Mode</button>"
+            "<button onclick=\"sendCommand('/preset-ac')\">Preset AC</button>"
             "<br>"
             "<h3>Fan Speed</h3>"
             "<button onclick=\"sendCommand('/fan/low')\">Fan Low</button>"
@@ -281,7 +278,6 @@ void setupServer() {
             "C</button>"
             "<button onclick=\"sendCommand('/temp/set/23')\">Set Temp 23 "
             "C</button>"
-            "<br>"
             "<button onclick=\"sendCommand('/temp/set/24')\">Set Temp 24 "
             "C</button>"
             "<button onclick=\"sendCommand('/temp/set/25')\">Set Temp 25 "
@@ -338,6 +334,12 @@ void setupServer() {
         request->send(200, "text/plain", "Fan toggled");
     });
 
+    // Route to handle Night Lamp toggle
+    server.on("/toggle-nl", HTTP_GET, [](AsyncWebServerRequest* request) {
+        digitalWrite(BUILTIN_LED, !digitalRead(BUILTIN_LED));
+        request->send(200, "text/plain", "Night Lamp toggled");
+    });
+
     // Define routes to handle control requests
     server.on("/power/on", HTTP_GET, [](AsyncWebServerRequest* request) {
         ac.setPower(true);
@@ -351,6 +353,29 @@ void setupServer() {
         ac.setPower(false);
         ac.send();
         request->send(200, "text/plain", "Power Off");
+    });
+
+    // Route to handle AC preset
+    server.on("/preset-ac", HTTP_GET, [](AsyncWebServerRequest* request) {
+        // get ac state
+        bool power = ac.getPower();
+        if (power) {  // if AC is already on, turn it off
+            ac.setPower(false);
+            ac.send();
+        } else {
+            ac.setPower(true);
+            ac.setMode(kCoolixCool);  // automatically set to COOL mode when AC
+                                      // is turned on
+            ac.setTemp(17);
+            ac.send();
+            ac.setTurbo();
+            ac.send();
+            ac.setSwing();
+            ac.send();
+            ac.setLed();
+            ac.send();
+        }
+        request->send(200, "text/plain", "Preset AC");
     });
 
     server.on("/mode/cool", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -434,23 +459,6 @@ void setupServer() {
     server.begin();
 }
 
-void checkConnections() {
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("Wi-Fi disconnected, reconnecting...");
-        setupWiFi();
-    } else {
-        Serial.println("Wi-Fi connected");
-        Serial.print("IP address: ");
-        Serial.println(WiFi.localIP());
-    }
-    if (!SinricPro.isConnected()) {
-        Serial.println("SinricPro disconnected, reconnecting...");
-    } else {
-        Serial.println("SinricPro connected");
-    }
-    Serial.println("-------------------------------------------");
-}
-
 void setup() {
     Serial.begin(115200);
     delay(1000);
@@ -465,9 +473,6 @@ void setup() {
     Serial.println("\nSetup end\n");
 }
 
-unsigned long lastCheckTime = 0;
-const unsigned long checkInterval = 60000;
-
 void loop() {
     SinricPro.handle();
 
@@ -481,11 +486,5 @@ void loop() {
     if (currentFanState != previousFanState) {
         previousFanState = currentFanState;
         digitalWrite(FAN_RELAY_PIN, currentFanState);
-    }
-
-    unsigned long currentTime = millis();
-    if (currentTime - lastCheckTime >= checkInterval) {
-        lastCheckTime = currentTime;
-        checkConnections();
     }
 }
