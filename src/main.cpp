@@ -366,7 +366,7 @@ void setupServer() {
             ac.setPower(true);
             ac.setMode(kCoolixCool);  // automatically set to COOL mode when AC
                                       // is turned on
-            ac.setTemp(17);
+            ac.setTemp(24);
             ac.send();
             ac.setTurbo();
             ac.send();
