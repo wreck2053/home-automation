@@ -18,11 +18,13 @@
     "1765edb0b078"
 
 int previousLightState = LOW;
+bool lightState = false;
 #define LIGHT_RELAY_PIN 18
 #define LIGHT_SWITCH_PIN 12
 #define SWITCH_ID_LIGHT "664268b26443b9bfe2b8d715"
 
 int previousFanState = LOW;
+bool fanState = false;
 #define FAN_RELAY_PIN 5
 #define FAN_SWITCH_PIN 13
 #define SWITCH_ID_FAN "6644c9cf6443b9bfe2b9dfb5"
@@ -32,6 +34,121 @@ IRsend irsend(IR_TRANSMITTER_PIN);
 IRCoolixAC ac(IR_TRANSMITTER_PIN);
 #define AC_ID "665cdc416e1af35935ffafc0"
 
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background: linear-gradient(180deg, #000000, #434343);
+    color: #f4f4f9;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    margin: 0;
+    padding: 20px;
+    box-sizing: border-box;
+}
+h1, h2, h3 {
+    color: #f4f4f9;
+}
+button {
+    background-color: #585858;
+    color: white;
+    border: none;
+    padding: 10px 20px;
+    margin: 10px;
+    font-size: 16px;
+    border-radius: 5px;
+    cursor: pointer;
+    transition: background-color 0.3s;
+}
+button:hover {
+    background-color: #757575;
+}
+div.container {
+    text-align: center;
+    background: rgba(255, 255, 255, 0.1);
+    padding: 20px;
+    border-radius: 10px;
+    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);
+    width: 100%;
+    max-width: 500px;
+}
+</style>
+<title>NodeMCU-32S Server</title>
+</head>
+<body>
+<div class="container">
+<h1>My Bedroom</h1>
+<button onclick="toggleLight()">Toggle Light</button>
+<br>
+<br>
+<button onclick="toggleFan()">Toggle Fan</button>
+<br>
+<br>
+<h2>AC Control</h2>
+<button onclick="sendCommand('/power/on')">Power On AC</button>
+<button onclick="sendCommand('/power/off')">Power Off AC</button>
+<br>
+<h3>Mode</h3>
+<button onclick="sendCommand('/mode/cool')">Cool Mode</button>
+<button onclick="sendCommand('/preset-ac')">Preset AC</button>
+<br>
+<h3>Fan Speed</h3>
+<button onclick="sendCommand('/fan/low')">Fan Low</button>
+<button onclick="sendCommand('/fan/med')">Fan Medium</button>
+<button onclick="sendCommand('/fan/high')">Fan High</button>
+<br>
+<h3>Temperature</h3>
+<button onclick="sendCommand('/temp/up')">Temp Up</button>
+<button onclick="sendCommand('/temp/down')">Temp Down</button>
+<br>
+<h3>Set Specific Temperature</h3>
+<button onclick="sendCommand('/temp/set/17')">Set Temp 17 C</button>
+<button onclick="sendCommand('/temp/set/18')">Set Temp 18 C</button>
+<button onclick="sendCommand('/temp/set/19')">Set Temp 19 C</button>
+<button onclick="sendCommand('/temp/set/20')">Set Temp 20 C</button>
+<button onclick="sendCommand('/temp/set/21')">Set Temp 21 C</button>
+<button onclick="sendCommand('/temp/set/22')">Set Temp 22 C</button>
+<button onclick="sendCommand('/temp/set/23')">Set Temp 23 C</button>
+<button onclick="sendCommand('/temp/set/24')">Set Temp 24 C</button>
+<button onclick="sendCommand('/temp/set/25')">Set Temp 25 C</button>
+<button onclick="sendCommand('/temp/set/26')">Set Temp 26 C</button>
+<button onclick="sendCommand('/temp/set/27')">Set Temp 27 C</button>
+<button onclick="sendCommand('/temp/set/28')">Set Temp 28 C</button>
+<button onclick="sendCommand('/temp/set/29')">Set Temp 29 C</button>
+<button onclick="sendCommand('/temp/set/30')">Set Temp 30 C</button>
+<button onclick="sendCommand('/state/swing')">Swing</button>
+<button onclick="sendCommand('/state/led')">Toggle LED</button>
+<button onclick="sendCommand('/state/turbo')">Turbo</button>
+</div>
+<script>
+function toggleLight() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/toggle-light', true);
+    xhr.send();
+}
+function toggleFan() {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', '/toggle-fan', true);
+    xhr.send();
+}
+function sendCommand(command) {
+    var xhr = new XMLHttpRequest();
+    xhr.open('GET', command, true);
+    xhr.send();
+}
+</script>
+</body>
+</html>
+)rawliteral";
+
 AsyncWebServer server(80);
 
 void setupDevices() {
@@ -40,6 +157,9 @@ void setupDevices() {
     pinMode(LIGHT_SWITCH_PIN, INPUT_PULLUP);
     pinMode(FAN_RELAY_PIN, OUTPUT);
     pinMode(FAN_SWITCH_PIN, INPUT_PULLUP);
+
+    digitalWrite(LIGHT_RELAY_PIN, lightState ? LOW : HIGH);
+    digitalWrite(FAN_RELAY_PIN, fanState ? LOW : HIGH);
 
     irsend.begin();
     ac.begin();
@@ -56,13 +176,15 @@ void setupWiFi() {
 
 bool onPowerStateLight(const String& deviceId, bool& state) {
     Serial.printf("Light turned %s\n", state ? "on" : "off");
-    digitalWrite(LIGHT_RELAY_PIN, state ? LOW : HIGH);
+    lightState = state;
+    digitalWrite(LIGHT_RELAY_PIN, lightState ? LOW : HIGH);
     return true;
 }
 
 bool onPowerStateFan(const String& deviceId, bool& state) {
     Serial.printf("Fan turned %s\n", state ? "on" : "off");
-    digitalWrite(FAN_RELAY_PIN, state ? LOW : HIGH);
+    fanState = state;
+    digitalWrite(FAN_RELAY_PIN, fanState ? LOW : HIGH);
     return true;
 }
 
@@ -185,152 +307,20 @@ void setupSinricPro() {
 void setupServer() {
     // Route for root / web page
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* request) {
-        request->send(
-            200, "text/html",
-            "<!DOCTYPE html>"
-            "<html lang=\"en\">"
-            "<head>"
-            "<meta charset=\"UTF-8\">"
-            "<meta name=\"viewport\" content=\"width=device-width, "
-            "initial-scale=1.0\">"
-            "<style>"
-            "body {"
-            "    font-family: Arial, sans-serif;"
-            "    background: linear-gradient(180deg, #000000, #434343);"
-            "    color: #f4f4f9;"
-            "    display: flex;"
-            "    flex-direction: column;"
-            "    align-items: center;"
-            "    justify-content: center;"
-            "    min-height: 100vh;"
-            "    margin: 0;"
-            "    padding: 20px;"
-            "    box-sizing: border-box;"
-            "}"
-            "h1, h2, h3 {"
-            "    color: #f4f4f9;"
-            "}"
-            "button {"
-            "    background-color: #585858;"
-            "    color: white;"
-            "    border: none;"
-            "    padding: 10px 20px;"
-            "    margin: 10px;"
-            "    font-size: 16px;"
-            "    border-radius: 5px;"
-            "    cursor: pointer;"
-            "    transition: background-color 0.3s;"
-            "}"
-            "button:hover {"
-            "    background-color: #757575;"
-            "}"
-            "div.container {"
-            "    text-align: center;"
-            "    background: rgba(255, 255, 255, 0.1);"
-            "    padding: 20px;"
-            "    border-radius: 10px;"
-            "    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.3);"
-            "    width: 100%;"
-            "    max-width: 500px;"
-            "}"
-            "</style>"
-            "<title>NodeMCU-32S Server</title>"
-            "</head>"
-            "<body>"
-            "<div class=\"container\">"
-            "<h1>My Bedroom</h1>"
-            "<button onclick=\"toggleLight()\">Toggle Light</button>"
-            "<br>"
-            "<br>"
-            "<button onclick=\"toggleFan()\">Toggle Fan</button>"
-            "<br>"
-            "<br>"
-            "<h2>AC Control</h2>"
-            "<button onclick=\"sendCommand('/power/on')\">Power On AC</button>"
-            "<button onclick=\"sendCommand('/power/off')\">Power Off "
-            "AC</button>"
-            "<br>"
-            "<h3>Mode</h3>"
-            "<button onclick=\"sendCommand('/mode/cool')\">Cool Mode</button>"
-            "<button onclick=\"sendCommand('/preset-ac')\">Preset AC</button>"
-            "<br>"
-            "<h3>Fan Speed</h3>"
-            "<button onclick=\"sendCommand('/fan/low')\">Fan Low</button>"
-            "<button onclick=\"sendCommand('/fan/med')\">Fan Medium</button>"
-            "<button onclick=\"sendCommand('/fan/high')\">Fan High</button>"
-            "<br>"
-            "<h3>Temperature</h3>"
-            "<button onclick=\"sendCommand('/temp/up')\">Temp Up</button>"
-            "<button onclick=\"sendCommand('/temp/down')\">Temp Down</button>"
-            "<br>"
-            "<h3>Set Specific Temperature</h3>"
-            "<button onclick=\"sendCommand('/temp/set/17')\">Set Temp 17 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/18')\">Set Temp 18 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/19')\">Set Temp 19 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/20')\">Set Temp 20 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/21')\">Set Temp 21 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/22')\">Set Temp 22 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/23')\">Set Temp 23 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/24')\">Set Temp 24 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/25')\">Set Temp 25 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/26')\">Set Temp 26 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/27')\">Set Temp 27 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/28')\">Set Temp 28 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/29')\">Set Temp 29 "
-            "C</button>"
-            "<button onclick=\"sendCommand('/temp/set/30')\">Set Temp 30 "
-            "C</button>"
-
-            "<button onclick=\"sendCommand('/state/swing')\">Swing"
-            "</button>"
-            "<button onclick=\"sendCommand('/state/led')\">Toggle LED"
-            "</button>"
-            "<button onclick=\"sendCommand('/state/turbo')\">Turbo"
-            "</button>"
-
-            "</div>"
-            "<script>"
-            "function toggleLight() {"
-            "    var xhr = new XMLHttpRequest();"
-            "    xhr.open('GET', '/toggle-light', true);"
-            "    xhr.send();"
-            "}"
-            "function toggleFan() {"
-            "    var xhr = new XMLHttpRequest();"
-            "    xhr.open('GET', '/toggle-fan', true);"
-            "    xhr.send();"
-            "}"
-            "function sendCommand(command) {"
-            "    var xhr = new XMLHttpRequest();"
-            "    xhr.open('GET', command, true);"
-            "    xhr.send();"
-            "}"
-            "</script>"
-            "</body>"
-            "</html>");
+        request->send_P(200, "text/html", index_html);
     });
 
     // Route to handle Light toggle
     server.on("/toggle-light", HTTP_GET, [](AsyncWebServerRequest* request) {
-        digitalWrite(LIGHT_RELAY_PIN, !digitalRead(LIGHT_RELAY_PIN));
+        lightState = !lightState;
+        digitalWrite(LIGHT_RELAY_PIN, lightState ? LOW : HIGH);
         request->send(200, "text/plain", "Light toggled");
     });
 
     // Route to handle Fan toggle
     server.on("/toggle-fan", HTTP_GET, [](AsyncWebServerRequest* request) {
-        digitalWrite(FAN_RELAY_PIN, !digitalRead(FAN_RELAY_PIN));
+        fanState = !fanState;
+        digitalWrite(FAN_RELAY_PIN, fanState ? LOW : HIGH);
         request->send(200, "text/plain", "Fan toggled");
     });
 
@@ -476,15 +466,32 @@ void setup() {
 void loop() {
     SinricPro.handle();
 
+    // Check WiFi connection and reconnect if needed
+    if (WiFi.status() != WL_CONNECTED) {
+        Serial.println("WiFi disconnected, attempting to reconnect...");
+        WiFi.reconnect();
+        delay(5000);  // Wait a bit before checking again
+    }
+
+    static unsigned long lastHeapPrint = 0;
+    if (millis() - lastHeapPrint > 30000) {  // Print every 30 seconds
+        Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
+        lastHeapPrint = millis();
+    }
+
     int currentLightState = digitalRead(LIGHT_SWITCH_PIN);  // light
     if (currentLightState != previousLightState) {
         previousLightState = currentLightState;
-        digitalWrite(LIGHT_RELAY_PIN, currentLightState);
+        lightState = (currentLightState == LOW);
+        digitalWrite(LIGHT_RELAY_PIN, lightState ? LOW : HIGH);
     }
 
     int currentFanState = digitalRead(FAN_SWITCH_PIN);  // fan
     if (currentFanState != previousFanState) {
         previousFanState = currentFanState;
-        digitalWrite(FAN_RELAY_PIN, currentFanState);
+        fanState = (currentFanState == LOW);
+        digitalWrite(FAN_RELAY_PIN, fanState ? LOW : HIGH);
     }
+
+    delay(10);  // Small delay to prevent tight looping
 }
