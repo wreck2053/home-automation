@@ -5,6 +5,10 @@
 #include "AppTypes.h"
 #include <ir_Coolix.h>
 
+#if __has_include("Secrets.h")
+#include "Secrets.h"
+#endif
+
 namespace AppConfig {
 
 namespace Wifi {
@@ -19,6 +23,19 @@ namespace Wifi {
 constexpr char kSsid[] = APP_WIFI_SSID;
 constexpr char kPassword[] = APP_WIFI_PASSWORD;
 }  // namespace Wifi
+
+namespace Ota {
+#ifndef APP_OTA_HOSTNAME
+#define APP_OTA_HOSTNAME "home-automation"
+#endif
+
+#ifndef APP_OTA_PASSWORD
+#define APP_OTA_PASSWORD ""
+#endif
+
+constexpr char kHostname[] = APP_OTA_HOSTNAME;
+constexpr char kPassword[] = APP_OTA_PASSWORD;
+}  // namespace Ota
 
 namespace Sinric {
 constexpr char kAppKey[] = "12fbb630-3465-4e47-a312-7888355266b4";

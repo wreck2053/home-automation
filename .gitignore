@@ -6,3 +6,4 @@
 mobileApp/ios
 mobileApp/android
 mobileApp/node_modules
+include/Secrets.h

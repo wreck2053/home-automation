@@ -3,6 +3,7 @@
 #include "AcController.h"
 #include "AppConfig.h"
 #include "CloudService.h"
+#include "OtaService.h"
 #include "RelayController.h"
 #include "WebServerModule.h"
 
@@ -49,6 +50,7 @@ void setup() {
   pinMode(AppConfig::Pins::kBuiltInLed, OUTPUT);
   RelayController::begin();
   AcController::begin();
+  OtaService::begin();
   CloudService::begin();
   WebServerModule::begin();
 
@@ -57,5 +59,6 @@ void setup() {
 
 void loop() {
   servicePhysicalControls();
+  OtaService::service();
   serviceHousekeeping();
 }
