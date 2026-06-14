@@ -61,14 +61,14 @@ constexpr uint8_t kIrTransmitter = 4;
 }  // namespace Pins
 
 namespace Timing {
-constexpr unsigned long kSwitchDebounceMs = 50;
+constexpr unsigned long kSwitchDebounceMs = 5;
 constexpr unsigned long kHeapLogIntervalMs = 30000;
 constexpr unsigned long kWiFiRetryIntervalMs = 5000;
 constexpr unsigned long kCloudRetryInitialMs = 10000;
 constexpr unsigned long kCloudRetryMaxMs = 60000;
 constexpr unsigned long kCloudHandleWindowMs = 15000;
 constexpr unsigned long kCloudTaskDelayMs = 20;
-constexpr unsigned long kAcPresetCommandGapMs = 750;
+constexpr unsigned long kAcPresetCommandGapMs = 500;
 constexpr int kInternetProbeTimeoutMs = 250;
 }  // namespace Timing
 

@@ -16,7 +16,7 @@ bool readingMeansOn(const int reading) { return reading == LOW; }
 
 bool applySwitchPosition(const int reading) {
   const bool power = readingMeansOn(reading);
-  if (!AcController::setPresetPower(power)) {
+  if (!AcController::requestPresetPower(power)) {
     return false;
   }
 

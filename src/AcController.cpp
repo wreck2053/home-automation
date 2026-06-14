@@ -13,6 +13,15 @@ namespace {
 
 IRCoolixAC ac(AppConfig::Pins::kIrTransmitter);
 SemaphoreHandle_t stateMutex = nullptr;
+uint8_t pendingPresetCommand = 0;
+unsigned long nextPresetCommandAt = 0;
+
+constexpr uint8_t kPresetCommandNone = 0;
+constexpr uint8_t kPresetCommandNormal = 1;
+constexpr uint8_t kPresetCommandTurbo = 2;
+constexpr uint8_t kPresetCommandSwing = 3;
+constexpr uint8_t kPresetCommandLed = 4;
+constexpr uint8_t kPresetCommandPowerOff = 5;
 
 class LockGuard {
  public:
@@ -78,6 +87,47 @@ uint8_t clampTemperature(const float temperature) {
 
 int clampFanLevel(const int fanLevel) { return constrain(fanLevel, 1, 3); }
 
+bool presetCommandEnabled(const uint8_t command) {
+  switch (command) {
+    case kPresetCommandNormal:
+      return true;
+    case kPresetCommandTurbo:
+      return AppConfig::AcDefaults::kPresetTurbo;
+    case kPresetCommandSwing:
+      return AppConfig::AcDefaults::kPresetSwing;
+    case kPresetCommandLed:
+      return AppConfig::AcDefaults::kPresetLed;
+    case kPresetCommandPowerOff:
+      return true;
+    default:
+      return false;
+  }
+}
+
+void cancelPendingPresetCommandsLocked() {
+  pendingPresetCommand = 0;
+  nextPresetCommandAt = 0;
+}
+
+void scheduleNextPresetCommandLocked(uint8_t command) {
+  while (command <= kPresetCommandLed && !presetCommandEnabled(command)) {
+    ++command;
+  }
+
+  if (command > kPresetCommandLed) {
+    cancelPendingPresetCommandsLocked();
+    return;
+  }
+
+  pendingPresetCommand = command;
+  nextPresetCommandAt = millis() + AppConfig::Timing::kAcPresetCommandGapMs;
+}
+
+void scheduleImmediatePresetCommandLocked(const uint8_t command) {
+  pendingPresetCommand = command;
+  nextPresetCommandAt = millis();
+}
+
 void syncStateFromDeviceLocked() {
   state.power = ac.getPower();
   state.mode = ac.getMode();
@@ -98,6 +148,7 @@ void applyNormalStateLocked() {
 }
 
 void applyPowerOffLocked() {
+  cancelPendingPresetCommandsLocked();
   ac.setPower(false);
   ac.send();
   ac.stateReset();
@@ -107,33 +158,68 @@ void applyPowerOffLocked() {
   state.turbo = false;
 }
 
-void waitBeforeNextPresetCommand() {
-  delay(AppConfig::Timing::kAcPresetCommandGapMs);
-}
-
 void applyPresetLocked() {
+  cancelPendingPresetCommandsLocked();
   state.power = true;
   state.mode = AppConfig::AcDefaults::kPresetMode;
   state.temperature = AppConfig::AcDefaults::kPresetTemperature;
   state.fanLevel = AppConfig::AcDefaults::kPresetFanLevel;
   applyNormalStateLocked();
 
-  if (AppConfig::AcDefaults::kPresetTurbo) {
-    waitBeforeNextPresetCommand();
-    ac.setTurbo();
-    ac.send();
+  state.turbo = AppConfig::AcDefaults::kPresetTurbo;
+  state.swing = AppConfig::AcDefaults::kPresetSwing;
+  state.led = AppConfig::AcDefaults::kPresetLed;
+  scheduleNextPresetCommandLocked(kPresetCommandTurbo);
+}
+
+void requestPresetLocked(const bool power) {
+  cancelPendingPresetCommandsLocked();
+
+  if (power) {
+    state.power = true;
+    state.mode = AppConfig::AcDefaults::kPresetMode;
+    state.temperature = AppConfig::AcDefaults::kPresetTemperature;
+    state.fanLevel = AppConfig::AcDefaults::kPresetFanLevel;
+    state.turbo = AppConfig::AcDefaults::kPresetTurbo;
+    state.swing = AppConfig::AcDefaults::kPresetSwing;
+    state.led = AppConfig::AcDefaults::kPresetLed;
+    scheduleImmediatePresetCommandLocked(kPresetCommandNormal);
+    return;
   }
-  if (AppConfig::AcDefaults::kPresetSwing) {
-    waitBeforeNextPresetCommand();
-    ac.setSwing();
-    ac.send();
+
+  state.power = false;
+  state.swing = false;
+  state.led = false;
+  state.turbo = false;
+  scheduleImmediatePresetCommandLocked(kPresetCommandPowerOff);
+}
+
+void sendPendingPresetCommandLocked() {
+  switch (pendingPresetCommand) {
+    case kPresetCommandNormal:
+      applyNormalStateLocked();
+      scheduleNextPresetCommandLocked(kPresetCommandTurbo);
+      return;
+    case kPresetCommandTurbo:
+      ac.setTurbo();
+      break;
+    case kPresetCommandSwing:
+      ac.setSwing();
+      break;
+    case kPresetCommandLed:
+      ac.setLed();
+      break;
+    case kPresetCommandPowerOff:
+      applyPowerOffLocked();
+      return;
+    default:
+      cancelPendingPresetCommandsLocked();
+      return;
   }
-  if (AppConfig::AcDefaults::kPresetLed) {
-    waitBeforeNextPresetCommand();
-    ac.setLed();
-    ac.send();
-  }
+
+  ac.send();
   syncStateFromDeviceLocked();
+  scheduleNextPresetCommandLocked(pendingPresetCommand + 1);
 }
 
 }  // namespace
@@ -146,11 +232,27 @@ void begin() {
   LockGuard lock(stateMutex);
   ac.begin();
   ac.stateReset();
+  cancelPendingPresetCommandsLocked();
   syncStateFromDeviceLocked();
+}
+
+bool service() {
+  LockGuard lock(stateMutex);
+  if (pendingPresetCommand == 0) {
+    return false;
+  }
+
+  if (static_cast<long>(millis() - nextPresetCommandAt) < 0) {
+    return false;
+  }
+
+  sendPendingPresetCommandLocked();
+  return true;
 }
 
 bool setPower(const bool power) {
   LockGuard lock(stateMutex);
+  cancelPendingPresetCommandsLocked();
   if (power) {
     state.power = true;
     state.mode = kCoolixCool;
@@ -163,6 +265,7 @@ bool setPower(const bool power) {
 
 bool setMode(const uint8_t mode) {
   LockGuard lock(stateMutex);
+  cancelPendingPresetCommandsLocked();
   state.power = true;
   state.mode = mode;
   applyNormalStateLocked();
@@ -171,6 +274,7 @@ bool setMode(const uint8_t mode) {
 
 bool setFanLevel(const int fanLevel) {
   LockGuard lock(stateMutex);
+  cancelPendingPresetCommandsLocked();
   state.power = true;
   state.fanLevel = clampFanLevel(fanLevel);
   state.mode = kCoolixCool;
@@ -187,6 +291,7 @@ bool adjustFanLevel(const int delta, int &absoluteFanLevel) {
 
 bool setTemperature(const float temperature) {
   LockGuard lock(stateMutex);
+  cancelPendingPresetCommandsLocked();
   state.power = true;
   state.temperature = clampTemperature(temperature);
   applyNormalStateLocked();
@@ -228,8 +333,19 @@ bool setPresetPower(const bool power) {
   return true;
 }
 
+bool requestPresetPower(const bool power) {
+  LockGuard lock(stateMutex);
+  if (state.power == power) {
+    return false;
+  }
+
+  requestPresetLocked(power);
+  return true;
+}
+
 bool toggleSwing() {
   LockGuard lock(stateMutex);
+  cancelPendingPresetCommandsLocked();
   ac.setSwing();
   ac.send();
   syncStateFromDeviceLocked();
@@ -238,6 +354,7 @@ bool toggleSwing() {
 
 bool toggleLed() {
   LockGuard lock(stateMutex);
+  cancelPendingPresetCommandsLocked();
   ac.setLed();
   ac.send();
   syncStateFromDeviceLocked();
@@ -246,6 +363,7 @@ bool toggleLed() {
 
 bool toggleTurbo() {
   LockGuard lock(stateMutex);
+  cancelPendingPresetCommandsLocked();
   ac.setTurbo();
   ac.send();
   syncStateFromDeviceLocked();

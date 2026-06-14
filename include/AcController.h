@@ -5,6 +5,7 @@
 namespace AcController {
 
 void begin();
+bool service();
 
 bool setPower(bool power);
 bool setMode(uint8_t mode);
@@ -14,6 +15,7 @@ bool setTemperature(float temperature);
 bool adjustTemperature(float delta, float &absoluteTemperature);
 bool togglePreset();
 bool setPresetPower(bool power);
+bool requestPresetPower(bool power);
 bool toggleSwing();
 bool toggleLed();
 bool toggleTurbo();
