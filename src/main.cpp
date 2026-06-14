@@ -1,6 +1,7 @@
 #include <Arduino.h>
 
 #include "AcController.h"
+#include "AcSwitchController.h"
 #include "AppConfig.h"
 #include "CloudService.h"
 #include "OtaService.h"
@@ -11,6 +12,7 @@ namespace {
 
 void servicePhysicalControls() {
   const uint8_t changeMask = RelayController::service();
+  const bool acChanged = AcSwitchController::service();
 
   if ((changeMask & kRelayChangeLight) != 0) {
     CloudService::notifyRelayState(RelayId::Light,
@@ -22,6 +24,10 @@ void servicePhysicalControls() {
     CloudService::notifyRelayState(RelayId::Fan,
                                    RelayController::getPower(RelayId::Fan),
                                    ControlSource::PhysicalSwitch);
+  }
+
+  if (acChanged) {
+    CloudService::notifyAcState(ControlSource::PhysicalSwitch);
   }
 }
 
@@ -50,6 +56,7 @@ void setup() {
   pinMode(AppConfig::Pins::kBuiltInLed, OUTPUT);
   RelayController::begin();
   AcController::begin();
+  AcSwitchController::begin();
   OtaService::begin();
   CloudService::begin();
   WebServerModule::begin();

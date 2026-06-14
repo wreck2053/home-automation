@@ -52,6 +52,7 @@ namespace Pins {
 constexpr uint8_t kBuiltInLed = BUILTIN_LED;
 constexpr DevicePins kLight{18, 12, true};
 constexpr DevicePins kFan{5, 13, true};
+constexpr uint8_t kAcSwitch = 19;
 constexpr uint8_t kIrTransmitter = 4;
 
 // ESP32 boot strap notes:
@@ -67,6 +68,7 @@ constexpr unsigned long kCloudRetryInitialMs = 10000;
 constexpr unsigned long kCloudRetryMaxMs = 60000;
 constexpr unsigned long kCloudHandleWindowMs = 15000;
 constexpr unsigned long kCloudTaskDelayMs = 20;
+constexpr unsigned long kAcPresetCommandGapMs = 750;
 constexpr int kInternetProbeTimeoutMs = 250;
 }  // namespace Timing
 
@@ -77,8 +79,8 @@ constexpr uint8_t kPresetTemperature = 24;
 constexpr uint8_t kPresetMode = kCoolixCool;
 constexpr int kPresetFanLevel = 2;
 constexpr bool kPresetSwing = true;
-constexpr bool kPresetLed = true;
-constexpr bool kPresetTurbo = true;
+constexpr bool kPresetLed = false;
+constexpr bool kPresetTurbo = false;
 }  // namespace AcDefaults
 
 }  // namespace AppConfig

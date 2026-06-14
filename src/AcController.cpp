@@ -89,7 +89,7 @@ void syncStateFromDeviceLocked() {
 }
 
 void applyNormalStateLocked() {
-  ac.setPower(state.power);
+  ac.setPower(true);
   ac.setMode(state.mode);
   ac.setTemp(state.temperature);
   ac.setFan(fanLevelToCoolixValue(state.fanLevel));
@@ -97,37 +97,43 @@ void applyNormalStateLocked() {
   syncStateFromDeviceLocked();
 }
 
-bool ensureSwingLocked(const bool desiredState) {
-  if (state.swing == desiredState) {
-    return false;
-  }
-
-  ac.setSwing();
+void applyPowerOffLocked() {
+  ac.setPower(false);
   ac.send();
-  syncStateFromDeviceLocked();
-  return true;
+  ac.stateReset();
+  state.power = false;
+  state.swing = false;
+  state.led = false;
+  state.turbo = false;
 }
 
-bool ensureLedLocked(const bool desiredState) {
-  if (state.led == desiredState) {
-    return false;
-  }
-
-  ac.setLed();
-  ac.send();
-  syncStateFromDeviceLocked();
-  return true;
+void waitBeforeNextPresetCommand() {
+  delay(AppConfig::Timing::kAcPresetCommandGapMs);
 }
 
-bool ensureTurboLocked(const bool desiredState) {
-  if (state.turbo == desiredState) {
-    return false;
-  }
+void applyPresetLocked() {
+  state.power = true;
+  state.mode = AppConfig::AcDefaults::kPresetMode;
+  state.temperature = AppConfig::AcDefaults::kPresetTemperature;
+  state.fanLevel = AppConfig::AcDefaults::kPresetFanLevel;
+  applyNormalStateLocked();
 
-  ac.setTurbo();
-  ac.send();
+  if (AppConfig::AcDefaults::kPresetTurbo) {
+    waitBeforeNextPresetCommand();
+    ac.setTurbo();
+    ac.send();
+  }
+  if (AppConfig::AcDefaults::kPresetSwing) {
+    waitBeforeNextPresetCommand();
+    ac.setSwing();
+    ac.send();
+  }
+  if (AppConfig::AcDefaults::kPresetLed) {
+    waitBeforeNextPresetCommand();
+    ac.setLed();
+    ac.send();
+  }
   syncStateFromDeviceLocked();
-  return true;
 }
 
 }  // namespace
@@ -144,35 +150,20 @@ void begin() {
 }
 
 bool setPower(const bool power) {
-  bool changed = false;
-
-  {
-    LockGuard lock(stateMutex);
-    if (power) {
-      changed = !state.power || state.mode != kCoolixCool;
-      state.power = true;
-      state.mode = kCoolixCool;
-    } else {
-      changed = state.power;
-      state.power = false;
-    }
-
-    if (!changed) {
-      return false;
-    }
-
+  LockGuard lock(stateMutex);
+  if (power) {
+    state.power = true;
+    state.mode = kCoolixCool;
     applyNormalStateLocked();
+  } else {
+    applyPowerOffLocked();
   }
-
   return true;
 }
 
 bool setMode(const uint8_t mode) {
   LockGuard lock(stateMutex);
-  if (state.mode == mode) {
-    return false;
-  }
-
+  state.power = true;
   state.mode = mode;
   applyNormalStateLocked();
   return true;
@@ -180,14 +171,8 @@ bool setMode(const uint8_t mode) {
 
 bool setFanLevel(const int fanLevel) {
   LockGuard lock(stateMutex);
-  const int clampedLevel = clampFanLevel(fanLevel);
-  const bool changed =
-      state.fanLevel != clampedLevel || state.mode != kCoolixCool;
-  if (!changed) {
-    return false;
-  }
-
-  state.fanLevel = clampedLevel;
+  state.power = true;
+  state.fanLevel = clampFanLevel(fanLevel);
   state.mode = kCoolixCool;
   applyNormalStateLocked();
   return true;
@@ -202,12 +187,8 @@ bool adjustFanLevel(const int delta, int &absoluteFanLevel) {
 
 bool setTemperature(const float temperature) {
   LockGuard lock(stateMutex);
-  const uint8_t clampedTemperature = clampTemperature(temperature);
-  if (state.temperature == clampedTemperature) {
-    return false;
-  }
-
-  state.temperature = clampedTemperature;
+  state.power = true;
+  state.temperature = clampTemperature(temperature);
   applyNormalStateLocked();
   return true;
 }
@@ -220,25 +201,31 @@ bool adjustTemperature(const float delta, float &absoluteTemperature) {
   return changed;
 }
 
-bool setPreset() {
+bool togglePreset() {
   LockGuard lock(stateMutex);
 
   if (state.power) {
-    state.power = false;
-    applyNormalStateLocked();
+    applyPowerOffLocked();
     return true;
   }
 
-  state.power = true;
-  state.mode = AppConfig::AcDefaults::kPresetMode;
-  state.temperature = AppConfig::AcDefaults::kPresetTemperature;
-  applyNormalStateLocked();
+  applyPresetLocked();
+  return true;
+}
 
-  bool changed = true;
-  changed |= ensureTurboLocked(AppConfig::AcDefaults::kPresetTurbo);
-  changed |= ensureSwingLocked(AppConfig::AcDefaults::kPresetSwing);
-  changed |= ensureLedLocked(AppConfig::AcDefaults::kPresetLed);
-  return changed;
+bool setPresetPower(const bool power) {
+  LockGuard lock(stateMutex);
+  if (state.power == power) {
+    return false;
+  }
+
+  if (power) {
+    applyPresetLocked();
+  } else {
+    applyPowerOffLocked();
+  }
+
+  return true;
 }
 
 bool toggleSwing() {

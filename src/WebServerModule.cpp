@@ -184,7 +184,7 @@ void begin() {
   });
 
   server.on("/preset-ac", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::setPreset()) {
+    if (AcController::togglePreset()) {
       syncAcEvent(ControlSource::Http);
     }
     sendPlainText(request, "Preset AC");
