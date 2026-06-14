@@ -8,8 +8,16 @@
 namespace AppConfig {
 
 namespace Wifi {
-constexpr char kSsid[] = "YOUR_SSID";
-constexpr char kPassword[] = "YOUR_PASS";
+#ifndef APP_WIFI_SSID
+#define APP_WIFI_SSID "YOUR_SSID"
+#endif
+
+#ifndef APP_WIFI_PASSWORD
+#define APP_WIFI_PASSWORD "YOUR_PASS"
+#endif
+
+constexpr char kSsid[] = APP_WIFI_SSID;
+constexpr char kPassword[] = APP_WIFI_PASSWORD;
 }  // namespace Wifi
 
 namespace Sinric {
@@ -40,7 +48,7 @@ constexpr unsigned long kHeapLogIntervalMs = 30000;
 constexpr unsigned long kWiFiRetryIntervalMs = 5000;
 constexpr unsigned long kCloudRetryInitialMs = 10000;
 constexpr unsigned long kCloudRetryMaxMs = 60000;
-constexpr unsigned long kCloudHandleWindowMs = 2500;
+constexpr unsigned long kCloudHandleWindowMs = 15000;
 constexpr unsigned long kCloudTaskDelayMs = 20;
 constexpr int kInternetProbeTimeoutMs = 250;
 }  // namespace Timing
