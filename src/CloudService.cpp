@@ -34,6 +34,18 @@ unsigned long cloudRetryBackoffMs = AppConfig::Timing::kCloudRetryInitialMs;
 unsigned long cloudHandleWindowUntil = 0;
 uint8_t pendingRelayMask = kRelayChangeLight | kRelayChangeFan;
 bool pendingAcSync = true;
+CallbackStats callbackStats{};
+
+enum class CallbackType : uint8_t {
+  LightPower,
+  FanPower,
+  AcPower,
+  AcRange,
+  AcAdjustRange,
+  AcTargetTemperature,
+  AcAdjustTemperature,
+  AcMode,
+};
 
 class LockGuard {
  public:
@@ -58,6 +70,37 @@ struct PendingSnapshot {
   uint8_t relayMask;
   bool acSync;
 };
+
+void recordCallback(const CallbackType type) {
+  LockGuard lock(stateMutex);
+  callbackStats.lastCallbackAtMs = millis();
+  switch (type) {
+    case CallbackType::LightPower:
+      ++callbackStats.lightPower;
+      break;
+    case CallbackType::FanPower:
+      ++callbackStats.fanPower;
+      break;
+    case CallbackType::AcPower:
+      ++callbackStats.acPower;
+      break;
+    case CallbackType::AcRange:
+      ++callbackStats.acRange;
+      break;
+    case CallbackType::AcAdjustRange:
+      ++callbackStats.acAdjustRange;
+      break;
+    case CallbackType::AcTargetTemperature:
+      ++callbackStats.acTargetTemperature;
+      break;
+    case CallbackType::AcAdjustTemperature:
+      ++callbackStats.acAdjustTemperature;
+      break;
+    case CallbackType::AcMode:
+      ++callbackStats.acMode;
+      break;
+  }
+}
 
 void scheduleCloudRetryLocked(const unsigned long now) {
   nextCloudRetryAt = now + cloudRetryBackoffMs;
@@ -163,6 +206,7 @@ void flushPendingEvents() {
 }
 
 bool onPowerStateLight(const String &, bool &state) {
+  recordCallback(CallbackType::LightPower);
   if (RelayController::setPower(RelayId::Light, state, ControlSource::Cloud)) {
     notifyRelayState(RelayId::Light, state, ControlSource::Cloud);
   }
@@ -170,6 +214,7 @@ bool onPowerStateLight(const String &, bool &state) {
 }
 
 bool onPowerStateFan(const String &, bool &state) {
+  recordCallback(CallbackType::FanPower);
   if (RelayController::setPower(RelayId::Fan, state, ControlSource::Cloud)) {
     notifyRelayState(RelayId::Fan, state, ControlSource::Cloud);
   }
@@ -177,48 +222,61 @@ bool onPowerStateFan(const String &, bool &state) {
 }
 
 bool onPowerStateAc(const String &, bool &state) {
-  if (AcController::setPower(state)) {
+  recordCallback(CallbackType::AcPower);
+  const bool queued = AcController::setPower(state);
+  if (queued) {
     notifyAcState(ControlSource::Cloud);
   }
-  return true;
+  return queued;
 }
 
 bool onRangeValueAc(const String &, int &rangeValue) {
+  recordCallback(CallbackType::AcRange);
   rangeValue = constrain(rangeValue, 1, 3);
-  if (AcController::setFanLevel(rangeValue)) {
+  const bool queued = AcController::setFanLevel(rangeValue);
+  if (queued) {
     notifyAcState(ControlSource::Cloud);
   }
   rangeValue = AcController::getState().fanLevel;
-  return true;
+  return queued;
 }
 
 bool onAdjustRangeValueAc(const String &, int &rangeDelta) {
+  recordCallback(CallbackType::AcAdjustRange);
   int absoluteFanLevel = 0;
-  if (AcController::adjustFanLevel(rangeDelta, absoluteFanLevel)) {
+  const bool queued =
+      AcController::adjustFanLevel(rangeDelta, absoluteFanLevel);
+  if (queued) {
     notifyAcState(ControlSource::Cloud);
   }
   rangeDelta = absoluteFanLevel;
-  return true;
+  return queued;
 }
 
 bool onTargetTemperatureAc(const String &, float &temperature) {
-  if (AcController::setTemperature(temperature)) {
+  recordCallback(CallbackType::AcTargetTemperature);
+  const bool queued = AcController::setTemperature(temperature);
+  if (queued) {
     notifyAcState(ControlSource::Cloud);
   }
   temperature = static_cast<float>(AcController::getState().temperature);
-  return true;
+  return queued;
 }
 
 bool onAdjustTargetTemperatureAc(const String &, float &temperatureDelta) {
+  recordCallback(CallbackType::AcAdjustTemperature);
   float absoluteTemperature = 0.0f;
-  if (AcController::adjustTemperature(temperatureDelta, absoluteTemperature)) {
+  const bool queued =
+      AcController::adjustTemperature(temperatureDelta, absoluteTemperature);
+  if (queued) {
     notifyAcState(ControlSource::Cloud);
   }
   temperatureDelta = absoluteTemperature;
-  return true;
+  return queued;
 }
 
 bool onThermostatModeAc(const String &, String &mode) {
+  recordCallback(CallbackType::AcMode);
   bool changed = false;
   if (mode == "COOL") {
     changed = AcController::setMode(kCoolixCool);
@@ -237,7 +295,7 @@ bool onThermostatModeAc(const String &, String &mode) {
   }
 
   mode = AcController::thermostatModeName();
-  return true;
+  return changed;
 }
 
 void setupCallbacks() {
@@ -401,6 +459,11 @@ bool isCloudConnected() {
 CloudConnectionState getConnectionState() {
   LockGuard lock(stateMutex);
   return connectionState;
+}
+
+CallbackStats getCallbackStats() {
+  LockGuard lock(stateMutex);
+  return callbackStats;
 }
 
 void notifyRelayState(const RelayId relayId, const bool power,

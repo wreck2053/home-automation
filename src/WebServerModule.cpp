@@ -143,6 +143,17 @@ void syncAcEvent(const ControlSource source) {
   CloudService::notifyAcState(source);
 }
 
+void sendAcCommandResult(AsyncWebServerRequest *request, const bool queued,
+                         const String &message) {
+  if (!queued) {
+    request->send(503, "text/plain", "AC command queue full");
+    return;
+  }
+
+  syncAcEvent(ControlSource::Http);
+  sendPlainText(request, message);
+}
+
 const char *cloudStateName(const CloudConnectionState state) {
   switch (state) {
     case CloudConnectionState::WiFiDisconnected:
@@ -168,6 +179,10 @@ void begin() {
 
   server.on("/diagnostics", HTTP_GET, [](AsyncWebServerRequest *request) {
     const IPAddress ip = WiFi.localIP();
+    const AcController::Diagnostics acDiagnostics =
+        AcController::getDiagnostics();
+    const CloudService::CallbackStats callbacks =
+        CloudService::getCallbackStats();
     String response;
     response.reserve(256);
     response += "uptime_ms=" + String(millis()) + "\n";
@@ -180,6 +195,29 @@ void begin() {
                 "\n";
     response += "cloud_connected=" +
                 String(CloudService::isCloudConnected() ? "true" : "false") +
+                "\n";
+    response += "callback_light_power=" + String(callbacks.lightPower) + "\n";
+    response += "callback_fan_power=" + String(callbacks.fanPower) + "\n";
+    response += "callback_ac_power=" + String(callbacks.acPower) + "\n";
+    response += "callback_ac_range=" + String(callbacks.acRange) + "\n";
+    response +=
+        "callback_ac_adjust_range=" + String(callbacks.acAdjustRange) + "\n";
+    response += "callback_ac_target_temperature=" +
+                String(callbacks.acTargetTemperature) + "\n";
+    response += "callback_ac_adjust_temperature=" +
+                String(callbacks.acAdjustTemperature) + "\n";
+    response += "callback_ac_mode=" + String(callbacks.acMode) + "\n";
+    response +=
+        "last_callback_at_ms=" + String(callbacks.lastCallbackAtMs) + "\n";
+    response += "ac_executed_commands=" +
+                String(acDiagnostics.executedCommands) + "\n";
+    response +=
+        "ac_ir_transmissions=" + String(acDiagnostics.irTransmissions) + "\n";
+    response +=
+        "ac_dropped_commands=" + String(acDiagnostics.droppedCommands) + "\n";
+    response +=
+        "ac_queued_commands=" + String(acDiagnostics.queuedCommands) + "\n";
+    response += "ac_last_ir_raw=0x" + String(acDiagnostics.lastIrRaw, HEX) +
                 "\n";
     sendPlainText(request, response);
   });
@@ -205,96 +243,63 @@ void begin() {
   });
 
   server.on("/power/on", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::setPower(true)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Power On");
+    sendAcCommandResult(request, AcController::setPower(true), "Power On");
   });
 
   server.on("/power/off", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::setPower(false)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Power Off");
+    sendAcCommandResult(request, AcController::setPower(false), "Power Off");
   });
 
   server.on("/preset-ac", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::togglePreset()) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Preset AC");
+    sendAcCommandResult(request, AcController::togglePreset(), "Preset AC");
   });
 
   server.on("/mode/cool", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::setMode(kCoolixCool)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Cool Mode");
+    sendAcCommandResult(request, AcController::setMode(kCoolixCool),
+                        "Cool Mode");
   });
 
   server.on("/mode/heat", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::setMode(kCoolixHeat)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Heat Mode");
+    sendAcCommandResult(request, AcController::setMode(kCoolixHeat),
+                        "Heat Mode");
   });
 
   server.on("/fan/low", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::setFanLevel(1)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Fan Low");
+    sendAcCommandResult(request, AcController::setFanLevel(1), "Fan Low");
   });
 
   server.on("/fan/med", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::setFanLevel(2)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Fan Medium");
+    sendAcCommandResult(request, AcController::setFanLevel(2), "Fan Medium");
   });
 
   server.on("/fan/high", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::setFanLevel(3)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Fan High");
+    sendAcCommandResult(request, AcController::setFanLevel(3), "Fan High");
   });
 
   server.on("/temp/up", HTTP_GET, [](AsyncWebServerRequest *request) {
     float absoluteTemperature = 0;
-    if (AcController::adjustTemperature(1.0f, absoluteTemperature)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Temperature Up");
+    sendAcCommandResult(
+        request, AcController::adjustTemperature(1.0f, absoluteTemperature),
+        "Temperature Up");
   });
 
   server.on("/temp/down", HTTP_GET, [](AsyncWebServerRequest *request) {
     float absoluteTemperature = 0;
-    if (AcController::adjustTemperature(-1.0f, absoluteTemperature)) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Temperature Down");
+    sendAcCommandResult(
+        request, AcController::adjustTemperature(-1.0f, absoluteTemperature),
+        "Temperature Down");
   });
 
   server.on("/state/swing", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::toggleSwing()) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Swing");
+    sendAcCommandResult(request, AcController::toggleSwing(), "Swing");
   });
 
   server.on("/state/led", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::toggleLed()) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Toggle LED");
+    sendAcCommandResult(request, AcController::toggleLed(), "Toggle LED");
   });
 
   server.on("/state/turbo", HTTP_GET, [](AsyncWebServerRequest *request) {
-    if (AcController::toggleTurbo()) {
-      syncAcEvent(ControlSource::Http);
-    }
-    sendPlainText(request, "Turbo");
+    sendAcCommandResult(request, AcController::toggleTurbo(), "Turbo");
   });
 
   for (int temperature = AppConfig::AcDefaults::kMinTemperature;
@@ -302,12 +307,11 @@ void begin() {
     const String route = "/temp/set/" + String(temperature);
     server.on(route.c_str(), HTTP_GET,
               [temperature](AsyncWebServerRequest *request) {
-                if (AcController::setTemperature(
-                        static_cast<float>(temperature))) {
-                  syncAcEvent(ControlSource::Http);
-                }
-                sendPlainText(request, "Temperature Set to " +
-                                           String(temperature) + " C");
+                sendAcCommandResult(
+                    request,
+                    AcController::setTemperature(
+                        static_cast<float>(temperature)),
+                    "Temperature Set to " + String(temperature) + " C");
               });
   }
 

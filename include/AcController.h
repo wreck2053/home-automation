@@ -4,6 +4,14 @@
 
 namespace AcController {
 
+struct Diagnostics {
+  uint32_t executedCommands;
+  uint32_t irTransmissions;
+  uint32_t droppedCommands;
+  uint32_t lastIrRaw;
+  uint8_t queuedCommands;
+};
+
 void begin();
 bool service();
 
@@ -21,6 +29,7 @@ bool toggleLed();
 bool toggleTurbo();
 
 AcState getState();
+Diagnostics getDiagnostics();
 String thermostatModeName();
 
 }  // namespace AcController
