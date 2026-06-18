@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <AsyncTCP.h>
 #include <ESPAsyncWebServer.h>
+#include <WiFi.h>
 
 #include "AcController.h"
 #include "AppConfig.h"
@@ -142,11 +143,45 @@ void syncAcEvent(const ControlSource source) {
   CloudService::notifyAcState(source);
 }
 
+const char *cloudStateName(const CloudConnectionState state) {
+  switch (state) {
+    case CloudConnectionState::WiFiDisconnected:
+      return "wifi_disconnected";
+    case CloudConnectionState::WiFiConnecting:
+      return "wifi_connecting";
+    case CloudConnectionState::InternetUnavailable:
+      return "internet_unavailable";
+    case CloudConnectionState::CloudConnecting:
+      return "cloud_connecting";
+    case CloudConnectionState::CloudConnected:
+      return "cloud_connected";
+  }
+  return "unknown";
+}
+
 }  // namespace
 
 void begin() {
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
     request->send_P(200, "text/html", indexHtml);
+  });
+
+  server.on("/diagnostics", HTTP_GET, [](AsyncWebServerRequest *request) {
+    const IPAddress ip = WiFi.localIP();
+    String response;
+    response.reserve(256);
+    response += "uptime_ms=" + String(millis()) + "\n";
+    response += "free_heap=" + String(ESP.getFreeHeap()) + "\n";
+    response += "wifi_status=" + String(static_cast<int>(WiFi.status())) + "\n";
+    response += "wifi_ip=" + ip.toString() + "\n";
+    response += "wifi_rssi_dbm=" + String(WiFi.RSSI()) + "\n";
+    response += "cloud_state=" +
+                String(cloudStateName(CloudService::getConnectionState())) +
+                "\n";
+    response += "cloud_connected=" +
+                String(CloudService::isCloudConnected() ? "true" : "false") +
+                "\n";
+    sendPlainText(request, response);
   });
 
   server.on("/toggle-light", HTTP_GET, [](AsyncWebServerRequest *request) {

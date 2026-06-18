@@ -69,7 +69,7 @@ constexpr unsigned long kCloudRetryMaxMs = 60000;
 constexpr unsigned long kCloudHandleWindowMs = 15000;
 constexpr unsigned long kCloudTaskDelayMs = 20;
 constexpr unsigned long kAcPresetCommandGapMs = 500;
-constexpr int kInternetProbeTimeoutMs = 250;
+constexpr int kInternetProbeTimeoutMs = 5000;
 }  // namespace Timing
 
 namespace AcDefaults {
