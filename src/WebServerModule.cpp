@@ -6,6 +6,7 @@
 #include <WiFi.h>
 
 #include "AcController.h"
+#include "AcSwitchController.h"
 #include "AppConfig.h"
 #include "CloudService.h"
 #include "RelayController.h"
@@ -181,10 +182,11 @@ void begin() {
     const IPAddress ip = WiFi.localIP();
     const AcController::Diagnostics acDiagnostics =
         AcController::getDiagnostics();
+    const AcState acState = AcController::getState();
     const CloudService::CallbackStats callbacks =
         CloudService::getCallbackStats();
     String response;
-    response.reserve(256);
+    response.reserve(768);
     response += "uptime_ms=" + String(millis()) + "\n";
     response += "free_heap=" + String(ESP.getFreeHeap()) + "\n";
     response += "wifi_status=" + String(static_cast<int>(WiFi.status())) + "\n";
@@ -217,8 +219,24 @@ void begin() {
         "ac_dropped_commands=" + String(acDiagnostics.droppedCommands) + "\n";
     response +=
         "ac_queued_commands=" + String(acDiagnostics.queuedCommands) + "\n";
+    response += "ac_queue_high_water_mark=" +
+                String(acDiagnostics.queueHighWaterMark) + "\n";
+    response += "ac_worker_running=" +
+                String(acDiagnostics.workerRunning ? "true" : "false") +
+                "\n";
+    response += "ac_last_command=" +
+                String(AcController::commandTypeName(
+                    acDiagnostics.lastCommand)) +
+                "\n";
     response += "ac_last_ir_raw=0x" + String(acDiagnostics.lastIrRaw, HEX) +
                 "\n";
+    response += "ac_power=" + String(acState.power ? "true" : "false") +
+                "\n";
+    response += "ac_mode=" + AcController::thermostatModeName() + "\n";
+    response += "ac_temperature=" + String(acState.temperature) + "\n";
+    response += "ac_fan_level=" + String(acState.fanLevel) + "\n";
+    response += "ac_physical_edges=" +
+                String(AcSwitchController::getPhysicalEdgeCount()) + "\n";
     sendPlainText(request, response);
   });
 

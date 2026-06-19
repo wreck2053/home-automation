@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 #include <ir_Coolix.h>
 
 #include "AppConfig.h"
@@ -13,15 +14,9 @@ namespace AcController {
 namespace {
 
 constexpr UBaseType_t kCommandQueueDepth = 16;
-
-enum class CommandType : uint8_t {
-  SetPower,
-  SetNormalState,
-  SetPresetPower,
-  ToggleSwing,
-  ToggleLed,
-  ToggleTurbo,
-};
+constexpr uint32_t kIrWorkerStackSize = 4096;
+constexpr UBaseType_t kIrWorkerPriority = 4;
+constexpr BaseType_t kIrWorkerCore = 1;
 
 struct Command {
   CommandType type;
@@ -31,14 +26,8 @@ struct Command {
 IRCoolixAC ac(AppConfig::Pins::kIrTransmitter);
 SemaphoreHandle_t stateMutex = nullptr;
 QueueHandle_t commandQueue = nullptr;
-uint8_t pendingPresetCommand = 0;
-unsigned long nextPresetCommandAt = 0;
+TaskHandle_t irWorkerTaskHandle = nullptr;
 Diagnostics diagnostics{};
-
-constexpr uint8_t kPresetCommandNone = 0;
-constexpr uint8_t kPresetCommandTurbo = 1;
-constexpr uint8_t kPresetCommandSwing = 2;
-constexpr uint8_t kPresetCommandLed = 3;
 
 class LockGuard {
  public:
@@ -91,132 +80,102 @@ uint8_t clampTemperature(const float temperature) {
 
 int clampFanLevel(const int fanLevel) { return constrain(fanLevel, 1, 3); }
 
-bool presetCommandEnabled(const uint8_t command) {
-  switch (command) {
-    case kPresetCommandTurbo:
-      return AppConfig::AcDefaults::kPresetTurbo;
-    case kPresetCommandSwing:
-      return AppConfig::AcDefaults::kPresetSwing;
-    case kPresetCommandLed:
-      return AppConfig::AcDefaults::kPresetLed;
-    default:
-      return false;
-  }
-}
-
-void cancelPendingPresetCommandsLocked() {
-  pendingPresetCommand = kPresetCommandNone;
-  nextPresetCommandAt = 0;
-}
-
-void scheduleNextPresetCommandLocked(uint8_t command) {
-  while (command <= kPresetCommandLed && !presetCommandEnabled(command)) {
-    ++command;
-  }
-
-  if (command > kPresetCommandLed) {
-    cancelPendingPresetCommandsLocked();
-    return;
-  }
-
-  pendingPresetCommand = command;
-  nextPresetCommandAt = millis() + AppConfig::Timing::kAcPresetCommandGapMs;
-}
-
 bool enqueueCommandLocked(const CommandType type, const AcState &state) {
-  const Command command{type, state};
-  if (commandQueue != nullptr &&
-      xQueueSend(commandQueue, &command, 0) == pdTRUE) {
-    return true;
+  if (commandQueue == nullptr) {
+    ++diagnostics.droppedCommands;
+    return false;
   }
 
-  ++diagnostics.droppedCommands;
-  return false;
+  const UBaseType_t queuedBefore = uxQueueMessagesWaiting(commandQueue);
+  const Command command{type, state};
+  if (xQueueSend(commandQueue, &command, 0) != pdTRUE) {
+    ++diagnostics.droppedCommands;
+    return false;
+  }
+
+  const uint8_t queuedAfter = static_cast<uint8_t>(queuedBefore + 1);
+  diagnostics.queueHighWaterMark =
+      max(diagnostics.queueHighWaterMark, queuedAfter);
+  return true;
 }
 
-void transmitLocked() {
-  diagnostics.lastIrRaw = ac.getRaw();
-  ac.send();
+void recordTransmission(const uint32_t raw) {
+  LockGuard lock(stateMutex);
+  diagnostics.lastIrRaw = raw;
   ++diagnostics.irTransmissions;
 }
 
-void applyNormalStateLocked(const AcState &state) {
+void transmit() {
+  const uint32_t raw = ac.getRaw();
+  ac.send();
+  recordTransmission(raw);
+}
+
+void applyNormalState(const AcState &state) {
   ac.setPower(true);
   ac.setMode(state.mode);
   ac.setTemp(state.temperature);
   ac.setFan(fanLevelToCoolixValue(state.fanLevel));
-  transmitLocked();
+  transmit();
 }
 
-void applyPowerOffLocked() {
+void applyPowerOff() {
   ac.setPower(false);
-  transmitLocked();
+  transmit();
   ac.stateReset();
 }
 
-void startPresetLocked(const AcState &state) {
-  cancelPendingPresetCommandsLocked();
-  applyNormalStateLocked(state);
-  scheduleNextPresetCommandLocked(kPresetCommandTurbo);
-}
-
-void executeCommandLocked(const Command &command) {
-  if (command.type != CommandType::SetPresetPower) {
-    cancelPendingPresetCommandsLocked();
-  }
-
+void executeCommand(const Command &command) {
   switch (command.type) {
     case CommandType::SetPower:
+    case CommandType::SetPresetPower:
       if (command.state.power) {
-        applyNormalStateLocked(command.state);
+        applyNormalState(command.state);
       } else {
-        applyPowerOffLocked();
+        applyPowerOff();
       }
       break;
     case CommandType::SetNormalState:
-      applyNormalStateLocked(command.state);
-      break;
-    case CommandType::SetPresetPower:
-      if (command.state.power) {
-        startPresetLocked(command.state);
-      } else {
-        cancelPendingPresetCommandsLocked();
-        applyPowerOffLocked();
-      }
+      applyNormalState(command.state);
       break;
     case CommandType::ToggleSwing:
       ac.setSwing();
-      transmitLocked();
+      transmit();
       break;
     case CommandType::ToggleLed:
       ac.setLed();
-      transmitLocked();
+      transmit();
       break;
     case CommandType::ToggleTurbo:
       ac.setTurbo();
-      transmitLocked();
+      transmit();
       break;
+    case CommandType::None:
+      return;
   }
 }
 
-void sendPendingPresetCommandLocked() {
-  switch (pendingPresetCommand) {
-    case kPresetCommandTurbo:
-      ac.setTurbo();
-      break;
-    case kPresetCommandSwing:
-      ac.setSwing();
-      break;
-    case kPresetCommandLed:
-      ac.setLed();
-      break;
-    default:
-      cancelPendingPresetCommandsLocked();
-      return;
+void irWorkerTask(void *) {
+  ac.begin();
+  ac.stateReset();
+
+  {
+    LockGuard lock(stateMutex);
+    diagnostics.workerRunning = true;
   }
 
-  transmitLocked();
-  scheduleNextPresetCommandLocked(pendingPresetCommand + 1);
+  for (;;) {
+    Command command{};
+    if (xQueueReceive(commandQueue, &command, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+
+    executeCommand(command);
+
+    LockGuard lock(stateMutex);
+    ++diagnostics.executedCommands;
+    diagnostics.lastCommand = command.type;
+  }
 }
 
 bool updateAndEnqueueLocked(const CommandType type,
@@ -229,6 +188,23 @@ bool updateAndEnqueueLocked(const CommandType type,
   return false;
 }
 
+void applyPresetStateLocked() {
+  desiredState.power = true;
+  desiredState.mode = AppConfig::AcDefaults::kPresetMode;
+  desiredState.temperature = AppConfig::AcDefaults::kPresetTemperature;
+  desiredState.fanLevel = AppConfig::AcDefaults::kPresetFanLevel;
+  desiredState.swing = false;
+  desiredState.led = false;
+  desiredState.turbo = false;
+}
+
+void applyOffStateLocked() {
+  desiredState.power = false;
+  desiredState.swing = false;
+  desiredState.led = false;
+  desiredState.turbo = false;
+}
+
 }  // namespace
 
 void begin() {
@@ -238,43 +214,22 @@ void begin() {
   if (commandQueue == nullptr) {
     commandQueue = xQueueCreate(kCommandQueueDepth, sizeof(Command));
   }
-
-  LockGuard lock(stateMutex);
-  ac.begin();
-  ac.stateReset();
-  cancelPendingPresetCommandsLocked();
-}
-
-bool service() {
-  LockGuard lock(stateMutex);
-
-  Command command{};
-  if (commandQueue != nullptr &&
-      xQueueReceive(commandQueue, &command, 0) == pdTRUE) {
-    ++diagnostics.executedCommands;
-    executeCommandLocked(command);
-    return true;
+  if (irWorkerTaskHandle == nullptr && stateMutex != nullptr &&
+      commandQueue != nullptr) {
+    xTaskCreatePinnedToCore(irWorkerTask, "AcIrWorker", kIrWorkerStackSize,
+                            nullptr, kIrWorkerPriority, &irWorkerTaskHandle,
+                            kIrWorkerCore);
   }
-
-  if (pendingPresetCommand == kPresetCommandNone ||
-      static_cast<long>(millis() - nextPresetCommandAt) < 0) {
-    return false;
-  }
-
-  sendPendingPresetCommandLocked();
-  return true;
 }
 
 bool setPower(const bool power) {
   LockGuard lock(stateMutex);
   const AcState previousState = desiredState;
-  desiredState.power = power;
   if (power) {
+    desiredState.power = true;
     desiredState.mode = kCoolixCool;
   } else {
-    desiredState.swing = false;
-    desiredState.led = false;
-    desiredState.turbo = false;
+    applyOffStateLocked();
   }
   return updateAndEnqueueLocked(CommandType::SetPower, previousState);
 }
@@ -331,48 +286,22 @@ bool adjustTemperature(const float delta, float &absoluteTemperature) {
 bool togglePreset() {
   LockGuard lock(stateMutex);
   const AcState previousState = desiredState;
-
   if (desiredState.power) {
-    desiredState.power = false;
-    desiredState.swing = false;
-    desiredState.led = false;
-    desiredState.turbo = false;
+    applyOffStateLocked();
   } else {
-    desiredState.power = true;
-    desiredState.mode = AppConfig::AcDefaults::kPresetMode;
-    desiredState.temperature = AppConfig::AcDefaults::kPresetTemperature;
-    desiredState.fanLevel = AppConfig::AcDefaults::kPresetFanLevel;
-    desiredState.turbo = AppConfig::AcDefaults::kPresetTurbo;
-    desiredState.swing = AppConfig::AcDefaults::kPresetSwing;
-    desiredState.led = AppConfig::AcDefaults::kPresetLed;
+    applyPresetStateLocked();
   }
-
   return updateAndEnqueueLocked(CommandType::SetPresetPower, previousState);
 }
 
-bool setPresetPower(const bool power) { return requestPresetPower(power); }
-
-bool requestPresetPower(const bool power) {
+bool setPresetPower(const bool power) {
   LockGuard lock(stateMutex);
-  if (desiredState.power == power) {
-    return false;
-  }
-
   const AcState previousState = desiredState;
-  desiredState.power = power;
   if (power) {
-    desiredState.mode = AppConfig::AcDefaults::kPresetMode;
-    desiredState.temperature = AppConfig::AcDefaults::kPresetTemperature;
-    desiredState.fanLevel = AppConfig::AcDefaults::kPresetFanLevel;
-    desiredState.turbo = AppConfig::AcDefaults::kPresetTurbo;
-    desiredState.swing = AppConfig::AcDefaults::kPresetSwing;
-    desiredState.led = AppConfig::AcDefaults::kPresetLed;
+    applyPresetStateLocked();
   } else {
-    desiredState.swing = false;
-    desiredState.led = false;
-    desiredState.turbo = false;
+    applyOffStateLocked();
   }
-
   return updateAndEnqueueLocked(CommandType::SetPresetPower, previousState);
 }
 
@@ -410,6 +339,26 @@ Diagnostics getDiagnostics() {
           ? 0
           : static_cast<uint8_t>(uxQueueMessagesWaiting(commandQueue));
   return snapshot;
+}
+
+const char *commandTypeName(const CommandType type) {
+  switch (type) {
+    case CommandType::SetPower:
+      return "set_power";
+    case CommandType::SetNormalState:
+      return "set_normal_state";
+    case CommandType::SetPresetPower:
+      return "set_preset_power";
+    case CommandType::ToggleSwing:
+      return "toggle_swing";
+    case CommandType::ToggleLed:
+      return "toggle_led";
+    case CommandType::ToggleTurbo:
+      return "toggle_turbo";
+    case CommandType::None:
+    default:
+      return "none";
+  }
 }
 
 String thermostatModeName() {

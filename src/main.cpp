@@ -66,7 +66,6 @@ void setup() {
 
 void loop() {
   servicePhysicalControls();
-  AcController::service();
   OtaService::service();
   serviceHousekeeping();
 }

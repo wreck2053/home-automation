@@ -62,13 +62,13 @@ constexpr uint8_t kIrTransmitter = 4;
 
 namespace Timing {
 constexpr unsigned long kSwitchDebounceMs = 5;
+constexpr unsigned long kAcSwitchDebounceMs = 50;
 constexpr unsigned long kHeapLogIntervalMs = 30000;
 constexpr unsigned long kWiFiRetryIntervalMs = 5000;
 constexpr unsigned long kCloudRetryInitialMs = 10000;
 constexpr unsigned long kCloudRetryMaxMs = 60000;
 constexpr unsigned long kCloudHandleWindowMs = 15000;
 constexpr unsigned long kCloudTaskDelayMs = 20;
-constexpr unsigned long kAcPresetCommandGapMs = 500;
 constexpr int kInternetProbeTimeoutMs = 5000;
 }  // namespace Timing
 
@@ -77,8 +77,8 @@ constexpr uint8_t kMinTemperature = kCoolixTempMin;
 constexpr uint8_t kMaxTemperature = kCoolixTempMax;
 constexpr uint8_t kPresetTemperature = 24;
 constexpr uint8_t kPresetMode = kCoolixCool;
-constexpr int kPresetFanLevel = 2;
-constexpr bool kPresetSwing = true;
+constexpr int kPresetFanLevel = 3;
+constexpr bool kPresetSwing = false;
 constexpr bool kPresetLed = false;
 constexpr bool kPresetTurbo = false;
 }  // namespace AcDefaults

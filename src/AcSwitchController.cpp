@@ -11,12 +11,25 @@ namespace {
 int lastReading = HIGH;
 int stableReading = HIGH;
 unsigned long lastDebounceAt = 0;
+uint32_t physicalEdgeCount = 0;
 
 bool readingMeansOn(const int reading) { return reading == LOW; }
 
-bool applySwitchPosition(const int reading) {
+bool applyInitialSwitchPosition(const int reading) {
   const bool power = readingMeansOn(reading);
-  if (!AcController::requestPresetPower(power)) {
+  if (!AcController::setPresetPower(power)) {
+    return false;
+  }
+
+  Serial.printf("AC initialized from physical switch: %s\r\n",
+                power ? "on (preset)" : "off");
+  return true;
+}
+
+bool applySwitchPosition(const int reading) {
+  ++physicalEdgeCount;
+  const bool power = readingMeansOn(reading);
+  if (!AcController::setPresetPower(power)) {
     return false;
   }
 
@@ -32,7 +45,7 @@ bool begin() {
   lastReading = digitalRead(AppConfig::Pins::kAcSwitch);
   stableReading = lastReading;
   lastDebounceAt = millis();
-  return applySwitchPosition(stableReading);
+  return applyInitialSwitchPosition(stableReading);
 }
 
 bool service() {
@@ -45,7 +58,7 @@ bool service() {
   }
 
   const bool debounced =
-      (now - lastDebounceAt) >= AppConfig::Timing::kSwitchDebounceMs;
+      (now - lastDebounceAt) >= AppConfig::Timing::kAcSwitchDebounceMs;
   if (!debounced || reading == stableReading) {
     return false;
   }
@@ -53,5 +66,7 @@ bool service() {
   stableReading = reading;
   return applySwitchPosition(stableReading);
 }
+
+uint32_t getPhysicalEdgeCount() { return physicalEdgeCount; }
 
 }  // namespace AcSwitchController
