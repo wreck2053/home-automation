@@ -63,6 +63,7 @@ constexpr uint8_t kIrTransmitter = 4;
 namespace Timing {
 constexpr unsigned long kSwitchDebounceMs = 5;
 constexpr unsigned long kAcSwitchDebounceMs = 50;
+constexpr unsigned long kLightColorCyclePulseMs = 20;
 constexpr unsigned long kHeapLogIntervalMs = 30000;
 constexpr unsigned long kWiFiRetryIntervalMs = 5000;
 constexpr unsigned long kCloudRetryInitialMs = 10000;
