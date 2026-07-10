@@ -9,12 +9,15 @@ const composerExpandEl = document.getElementById("composerExpand");
 const sendButton = document.getElementById("send");
 const sendTextEl = document.getElementById("sendText");
 const sendIconEl = document.getElementById("sendIcon");
+const stopButton = document.getElementById("stopResponse");
+const scrollLatestButton = document.getElementById("scrollLatest");
 const healthEl = document.getElementById("health");
 const railEl = document.getElementById("workflowRail");
 const modelNameEl = document.getElementById("modelName");
 const sessionTokensEl = document.getElementById("sessionTokens");
 const sessionCostEl = document.getElementById("sessionCost");
-const headerMessageCountEl = document.getElementById("headerMessageCount");
+const grandTokensEl = document.getElementById("grandTokens");
+const grandCostEl = document.getElementById("grandCost");
 const activeSessionTitleEl = document.getElementById("activeSessionTitle");
 const messageCountEl = document.getElementById("messageCount");
 const sessionListEl = document.getElementById("sessionList");
@@ -27,11 +30,11 @@ const usageTotalTokensEl = document.getElementById("usageTotalTokens");
 const usageTotalCostEl = document.getElementById("usageTotalCost");
 const modelCallsEl = document.getElementById("modelCalls");
 const tokenCallsEl = document.getElementById("tokenCalls");
-const pricingLabelEl = document.getElementById("pricingLabel");
 const workflowDetailKickerEl = document.getElementById("workflowDetailKicker");
 const workflowDetailTitleEl = document.getElementById("workflowDetailTitle");
 const workflowDetailMessageEl = document.getElementById("workflowDetailMessage");
 const workflowDetailActualEl = document.getElementById("workflowDetailActual");
+const workflowTooltipEl = document.getElementById("workflowTooltip");
 const usagePanel = document.getElementById("usagePanel");
 const workflowPanel = document.getElementById("workflowPanel");
 const usageTab = document.getElementById("usageTab");
@@ -39,7 +42,8 @@ const workflowTab = document.getElementById("workflowTab");
 const { setMarkdown } = window.RoomMarkdown;
 const { resolveToolResult, failPendingToolCalls } = window.RoomToolProgress;
 
-const MAX_MESSAGES_PER_SESSION = 20;
+const MAX_USER_MESSAGES_PER_SESSION = 10;
+const MAX_REQUEST_MESSAGES = 20;
 
 const STORAGE_KEYS = {
   sessions: "roomAssistant.sessions.v1",
@@ -91,14 +95,56 @@ let activeTraceView = null;
 let activeTraceUserMessageId = null;
 let activeTraceActivity = "";
 let traceTimer = null;
+let streamAssistantView = null;
+let streamAssistantText = "";
+let streamAnimationTimer = null;
+let autoFollowLatest = true;
+let userScrollAwayIntentTimer = null;
+let userScrollAwayIntent = false;
+let lastTouchY = null;
 let sessions = loadSessions();
 let activeSessionId = loadActiveSessionId();
 let selectedWorkflowStep = "load_state";
+let visibleWorkflowTooltipStep = null;
+let workflowTooltipHideTimer = null;
 let workflowEvents = {};
 let composerExpanded = false;
+const TRACE_TOGGLE_ANIMATION_MS = 240;
+const runTraceAnimationTimers = new WeakMap();
 
 // Persist normalized sessions so saved Flash calls are repriced with Flash rates on reload.
 saveSessions();
+
+function setIcon(target, iconName) {
+  if (!target) return;
+  target.dataset.icon = iconName;
+  target.replaceChildren();
+  const iconNode = window.lucide && window.lucide.icons && window.lucide.icons[iconName];
+  if (!iconNode || typeof window.lucide.createElement !== "function") {
+    target.textContent = "";
+    return;
+  }
+  const svg = window.lucide.createElement(iconNode, {
+    "aria-hidden": "true",
+    focusable: "false",
+    class: "lucide-icon",
+  });
+  target.appendChild(svg);
+}
+
+function refreshIcons(root = document) {
+  root.querySelectorAll("[data-icon]").forEach((target) => {
+    setIcon(target, target.dataset.icon);
+  });
+}
+
+function iconSpan(iconName) {
+  const span = document.createElement("span");
+  span.className = "button-icon";
+  span.dataset.icon = iconName;
+  span.setAttribute("aria-hidden", "true");
+  return span;
+}
 
 function emptyUsageTotals() {
   return {
@@ -151,6 +197,39 @@ function createSession(title = "New chat") {
     usageTotals: emptyUsageTotals(),
     usageCalls: [],
   };
+}
+
+function userMessageCount(historyOrSession) {
+  const history = Array.isArray(historyOrSession)
+    ? historyOrSession
+    : Array.isArray(historyOrSession && historyOrSession.history)
+      ? historyOrSession.history
+      : [];
+  return history.filter((item) => item && item.role === "user").length;
+}
+
+function trimHistoryToUserLimit(history, maxUsers = MAX_USER_MESSAGES_PER_SESSION) {
+  if (!Array.isArray(history)) return [];
+  const kept = [];
+  let users = 0;
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const item = history[index];
+    if (!item || (item.role !== "user" && item.role !== "assistant")) continue;
+    if (item.role === "user") {
+      if (users >= maxUsers) break;
+      users += 1;
+    }
+    kept.push(item);
+  }
+  const ordered = kept.reverse();
+  while (ordered.length && ordered[0].role !== "user") ordered.shift();
+  return ordered;
+}
+
+function requestHistory(history) {
+  return trimHistoryToUserLimit(history)
+    .slice(-MAX_REQUEST_MESSAGES)
+    .map((item) => ({ role: item.role, content: item.content }));
 }
 
 function modelPricing(model) {
@@ -225,6 +304,7 @@ function normalizeCall(call) {
 function normalizeTraceStep(raw) {
   const source = raw && typeof raw === "object" ? raw : {};
   const allowedTypes = new Set(["model", "tool_call", "tool_result", "direct", "error"]);
+  const createdAt = source.createdAt || source.created_at || "";
   return {
     id: String(source.id || newId()),
     type: allowedTypes.has(source.type) ? source.type : "model",
@@ -234,6 +314,7 @@ function normalizeTraceStep(raw) {
     args: source.args && typeof source.args === "object" ? sanitizeTraceValue(source.args) : null,
     success: typeof source.success === "boolean" ? source.success : null,
     elapsedMs: Math.max(0, Number(source.elapsedMs) || 0),
+    createdAt: createdAt ? String(createdAt) : "",
   };
 }
 
@@ -283,17 +364,18 @@ function normalizeSession(raw) {
   normalized.updatedAt = session.updatedAt || normalized.createdAt;
   normalized.model = String(session.model || "");
   normalized.history = Array.isArray(session.history)
-    ? session.history
-        .filter((item) => item && (item.role === "user" || item.role === "assistant"))
-        .map((item) => ({
-          id: String(item.id || newId()),
-          role: item.role,
-          content: String(item.content || ""),
-          time: item.time || "",
-          trace: item.role === "user" ? normalizeRunTrace(item.trace) : null,
-        }))
-        .filter((item) => item.content)
-        .slice(-MAX_MESSAGES_PER_SESSION)
+    ? trimHistoryToUserLimit(
+        session.history
+          .filter((item) => item && (item.role === "user" || item.role === "assistant"))
+          .map((item) => ({
+            id: String(item.id || newId()),
+            role: item.role,
+            content: String(item.content || ""),
+            time: item.time || "",
+            trace: item.role === "user" ? normalizeRunTrace(item.trace) : null,
+          }))
+          .filter((item) => item.content)
+      )
     : [];
   normalized.usageCalls = Array.isArray(session.usageCalls)
     ? session.usageCalls.map(normalizeCall).slice(0, 80)
@@ -312,7 +394,7 @@ function migrateLegacySessions() {
   const usageTotals = loadJson(STORAGE_KEYS.legacyUsageTotals, emptyUsageTotals());
   const usageCalls = loadJson(STORAGE_KEYS.legacyUsageCalls, []);
   const session = createSession(Array.isArray(history) && history.length ? "Imported chat" : "New chat");
-  session.history = Array.isArray(history) ? history.slice(-MAX_MESSAGES_PER_SESSION) : [];
+  session.history = Array.isArray(history) ? trimHistoryToUserLimit(history) : [];
   session.usageTotals = normalizeUsageTotals(usageTotals);
   session.usageCalls = Array.isArray(usageCalls) ? usageCalls.map(normalizeCall).slice(0, 80) : [];
   return [normalizeSession(session)];
@@ -366,6 +448,10 @@ function formatTime(date = new Date()) {
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function formatClockTime(date = new Date()) {
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
 function formatSessionTime(value) {
   const date = value ? new Date(value) : new Date();
   if (Number.isNaN(date.getTime())) return "";
@@ -381,7 +467,60 @@ function deriveTitle(text) {
   return cleaned.length > 44 ? `${cleaned.slice(0, 41)}...` : cleaned;
 }
 
-function addMessage(role, text, timestamp = formatTime()) {
+function shouldAutoFollow(threshold = 72) {
+  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight <= threshold;
+}
+
+function isFollowingLatest() {
+  return autoFollowLatest && !userScrollAwayIntent;
+}
+
+function updateScrollLatestButton({ syncFollow = false } = {}) {
+  if (!scrollLatestButton) return;
+  const atLatest = shouldAutoFollow();
+  if (syncFollow) {
+    autoFollowLatest = atLatest;
+  } else if (atLatest && !userScrollAwayIntent) {
+    autoFollowLatest = true;
+  }
+  const composerOffset = composer ? composer.offsetHeight || 150 : 150;
+  const noticeOffset = limitNoticeEl && !limitNoticeEl.hidden ? limitNoticeEl.offsetHeight + 10 : 0;
+  scrollLatestButton.style.bottom = `${composerOffset + noticeOffset + 14}px`;
+  scrollLatestButton.hidden = isFollowingLatest() || atLatest;
+}
+
+function scrollToLatest({ force = false } = {}) {
+  if (force || isFollowingLatest() || (!userScrollAwayIntent && shouldAutoFollow())) {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    autoFollowLatest = true;
+    userScrollAwayIntent = false;
+    if (userScrollAwayIntentTimer) window.clearTimeout(userScrollAwayIntentTimer);
+    userScrollAwayIntentTimer = null;
+  }
+  updateScrollLatestButton();
+}
+
+function pauseAutoFollowForUserScroll() {
+  if (!autoFollowLatest) return;
+  autoFollowLatest = false;
+  userScrollAwayIntent = true;
+  if (userScrollAwayIntentTimer) window.clearTimeout(userScrollAwayIntentTimer);
+  userScrollAwayIntentTimer = window.setTimeout(() => {
+    userScrollAwayIntent = false;
+    if (shouldAutoFollow()) autoFollowLatest = true;
+    updateScrollLatestButton();
+  }, 350);
+}
+
+function handleMessagesScroll() {
+  userScrollAwayIntent = false;
+  if (userScrollAwayIntentTimer) window.clearTimeout(userScrollAwayIntentTimer);
+  userScrollAwayIntentTimer = null;
+  updateScrollLatestButton({ syncFollow: true });
+}
+
+function addMessage(role, text, timestamp = formatTime(), options = {}) {
+  const shouldFollow = Boolean(options.forceScroll) || isFollowingLatest() || (!userScrollAwayIntent && shouldAutoFollow());
   const row = document.createElement("div");
   row.className = `message-row ${role}`;
 
@@ -411,12 +550,63 @@ function addMessage(role, text, timestamp = formatTime()) {
     row.append(avatar, bubble);
   }
   messagesEl.appendChild(row);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  scrollToLatest({ force: shouldFollow });
   return { row, avatar, bubble, label, body };
 }
 
+function resetStreamingAssistant() {
+  if (streamAnimationTimer) window.clearTimeout(streamAnimationTimer);
+  streamAnimationTimer = null;
+  if (streamAssistantView) {
+    streamAssistantView.bubble.classList.remove("streaming", "streaming-tick");
+  }
+  streamAssistantView = null;
+  streamAssistantText = "";
+}
+
+function pulseStreamingAssistant() {
+  if (!streamAssistantView) return;
+  const bubble = streamAssistantView.bubble;
+  bubble.classList.add("streaming");
+  bubble.classList.remove("streaming-tick");
+  bubble.getBoundingClientRect();
+  bubble.classList.add("streaming-tick");
+  if (streamAnimationTimer) window.clearTimeout(streamAnimationTimer);
+  streamAnimationTimer = window.setTimeout(() => {
+    bubble.classList.remove("streaming-tick");
+    streamAnimationTimer = null;
+  }, 180);
+}
+
+function appendStreamingAssistantToken(token) {
+  const text = String(token || "");
+  if (!text) return;
+  if (!streamAssistantView) {
+    streamAssistantView = addMessage("assistant", "");
+  }
+  streamAssistantText += text;
+  setMarkdown(streamAssistantView.body, streamAssistantText);
+  pulseStreamingAssistant();
+  scrollToLatest();
+}
+
+function finalizeAssistantMessage(content) {
+  const finalText = String(content || streamAssistantText || "");
+  if (!finalText.trim()) return;
+  if (streamAssistantView) {
+    setMarkdown(streamAssistantView.body, finalText);
+    streamAssistantView.bubble.classList.remove("streaming", "streaming-tick");
+  } else {
+    streamAssistantView = addMessage("assistant", finalText);
+  }
+  if (streamAnimationTimer) window.clearTimeout(streamAnimationTimer);
+  streamAnimationTimer = null;
+  streamAssistantText = finalText;
+}
+
 function formatTraceDuration(durationMs) {
-  return `${(Math.max(0, durationMs) / 1000).toFixed(1)} seconds`;
+  const seconds = Math.max(0, Math.round(durationMs / 1000));
+  return `${seconds} second${seconds === 1 ? "" : "s"}`;
 }
 
 function traceSummary(trace, live = false) {
@@ -462,7 +652,19 @@ function createRunTrace() {
   };
 }
 
-function renderTraceStep(step) {
+function traceStepTimestamp(step, trace) {
+  if (step.createdAt) {
+    const createdAt = new Date(step.createdAt);
+    if (!Number.isNaN(createdAt.getTime())) return createdAt;
+  }
+  const startedAt = Number(trace && trace.startedAt);
+  if (step.type === "tool_call" && Number.isFinite(startedAt)) {
+    return new Date(startedAt + (Number(step.elapsedMs) || 0));
+  }
+  return null;
+}
+
+function renderTraceStep(step, trace = null) {
   const item = document.createElement("article");
   const stateClass = step.success === true ? "succeeded" : step.success === false ? "failed" : "pending";
   item.className = `trace-step ${step.type} ${stateClass}`.trim();
@@ -475,7 +677,11 @@ function renderTraceStep(step) {
   const title = document.createElement("strong");
   title.textContent = step.title;
   const elapsed = document.createElement("span");
-  elapsed.textContent = `+${formatTraceDuration(step.elapsedMs)}`;
+  const createdAt = traceStepTimestamp(step, trace);
+  elapsed.textContent =
+    step.type === "tool_call" && createdAt && !Number.isNaN(createdAt.getTime())
+      ? formatClockTime(createdAt)
+      : `+${formatTraceDuration(step.elapsedMs)}`;
   header.append(title, elapsed);
   const body = document.createElement("div");
   body.className = "trace-step-body";
@@ -502,11 +708,18 @@ function renderRunTrace(trace, active = false) {
   row.className = "run-trace-row";
   const details = document.createElement("details");
   details.className = `run-trace ${trace.status}`;
-  details.open = active;
+  details.open = true;
+  details.dataset.expanded = String(active);
+  details.classList.toggle("collapsed", !active);
   const summary = document.createElement("summary");
+  summary.setAttribute("aria-expanded", String(active));
+  summary.addEventListener("click", (event) => {
+    event.preventDefault();
+    toggleRunTrace(details);
+  });
   const chevron = document.createElement("span");
   chevron.className = "trace-chevron";
-  chevron.textContent = ">";
+  chevron.dataset.icon = "ChevronRight";
   chevron.setAttribute("aria-hidden", "true");
   const summaryLabel = document.createElement("strong");
   summaryLabel.textContent = traceSummary(trace, active);
@@ -518,7 +731,7 @@ function renderRunTrace(trace, active = false) {
   body.className = "run-trace-body";
   const timeline = document.createElement("div");
   timeline.className = "trace-timeline";
-  trace.steps.forEach((step) => timeline.appendChild(renderTraceStep(step)));
+  trace.steps.forEach((step) => timeline.appendChild(renderTraceStep(step, trace)));
   const activity = document.createElement("div");
   activity.className = "trace-activity";
   activity.hidden = !active;
@@ -526,7 +739,8 @@ function renderRunTrace(trace, active = false) {
   details.append(summary, body);
   row.appendChild(details);
   messagesEl.appendChild(row);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  refreshIcons(row);
+  scrollToLatest();
   return { row, details, summaryLabel, stepCount, timeline, activity };
 }
 
@@ -534,7 +748,7 @@ function refreshActiveTraceView() {
   if (!activeTrace || !activeTraceView) return;
   activeTraceView.summaryLabel.textContent = traceSummary(activeTrace, true);
   activeTraceView.stepCount.textContent = `${activeTrace.steps.length} step${activeTrace.steps.length === 1 ? "" : "s"}`;
-  activeTraceView.timeline.replaceChildren(...activeTrace.steps.map(renderTraceStep));
+  activeTraceView.timeline.replaceChildren(...activeTrace.steps.map((step) => renderTraceStep(step, activeTrace)));
   activeTraceView.activity.hidden = false;
   activeTraceView.activity.replaceChildren();
   const indicator = document.createElement("span");
@@ -543,7 +757,81 @@ function refreshActiveTraceView() {
   const text = document.createElement("span");
   text.textContent = activeTraceActivity || "Working";
   activeTraceView.activity.append(indicator, text);
-  messagesEl.scrollTop = messagesEl.scrollHeight;
+  scrollToLatest();
+}
+
+function clearRunTraceAnimation(details) {
+  const timer = runTraceAnimationTimers.get(details);
+  if (timer) window.clearTimeout(timer);
+  runTraceAnimationTimers.delete(details);
+}
+
+function runTraceBody(details) {
+  return details ? details.querySelector(".run-trace-body") : null;
+}
+
+function finishRunTraceAnimation(details, body) {
+  details.classList.remove("opening", "closing");
+  if (body) body.style.maxHeight = "";
+  runTraceAnimationTimers.delete(details);
+}
+
+function setRunTraceExpanded(details, expanded) {
+  details.open = true;
+  details.dataset.expanded = String(expanded);
+  const summary = details.querySelector("summary");
+  if (summary) summary.setAttribute("aria-expanded", String(expanded));
+}
+
+function expandRunTrace(details) {
+  if (!details || (details.dataset.expanded === "true" && !details.classList.contains("closing"))) return;
+  const body = details.querySelector(".run-trace-body");
+  if (!body) {
+    setRunTraceExpanded(details, true);
+    return;
+  }
+  clearRunTraceAnimation(details);
+  body.style.maxHeight = "0px";
+  setRunTraceExpanded(details, true);
+  details.classList.remove("closing", "collapsed");
+  details.classList.add("opening");
+  body.getBoundingClientRect();
+  requestAnimationFrame(() => {
+    body.style.maxHeight = `${body.scrollHeight}px`;
+  });
+  const timer = window.setTimeout(() => finishRunTraceAnimation(details, body), TRACE_TOGGLE_ANIMATION_MS);
+  runTraceAnimationTimers.set(details, timer);
+}
+
+function collapseRunTrace(details) {
+  if (!details || (details.dataset.expanded === "false" && !details.classList.contains("opening"))) return;
+  const body = runTraceBody(details);
+  if (!body) {
+    setRunTraceExpanded(details, false);
+    details.classList.add("collapsed");
+    return;
+  }
+  clearRunTraceAnimation(details);
+  details.classList.remove("opening");
+  body.style.maxHeight = `${body.scrollHeight}px`;
+  body.getBoundingClientRect();
+  details.classList.add("closing");
+  setRunTraceExpanded(details, false);
+  requestAnimationFrame(() => {
+    body.style.maxHeight = "0px";
+  });
+  const timer = window.setTimeout(() => {
+    details.classList.add("collapsed");
+    finishRunTraceAnimation(details, body);
+  }, TRACE_TOGGLE_ANIMATION_MS);
+  runTraceAnimationTimers.set(details, timer);
+}
+
+function toggleRunTrace(details) {
+  if (!details) return;
+  if (details.classList.contains("closing")) expandRunTrace(details);
+  else if (details.dataset.expanded === "true") collapseRunTrace(details);
+  else expandRunTrace(details);
 }
 
 function persistActiveTrace() {
@@ -585,6 +873,7 @@ function appendTraceStep(step) {
     normalizeTraceStep({
       id: newId(),
       elapsedMs: Date.now() - activeTrace.startedAt,
+      createdAt: nowIso(),
       ...step,
     })
   );
@@ -609,7 +898,7 @@ function finishRunTrace(status) {
     activeTraceView.summaryLabel.textContent = traceSummary(activeTrace);
     activeTraceView.stepCount.textContent = `${activeTrace.steps.length} step${activeTrace.steps.length === 1 ? "" : "s"}`;
     activeTraceView.activity.hidden = true;
-    activeTraceView.details.open = false;
+    collapseRunTrace(activeTraceView.details);
   }
   activeTrace = null;
   activeTraceView = null;
@@ -696,10 +985,12 @@ function renderPersistedChat() {
     addMessage(item.role, item.content, item.time || "");
     if (item.role === "user" && item.trace) renderRunTrace(item.trace, false);
   });
+  scrollToLatest({ force: true });
 }
 
 function resetWorkflow() {
   workflowEvents = {};
+  hideWorkflowTooltipNow();
   railEl.querySelectorAll("[data-step]").forEach((item) => {
     item.classList.remove("active", "completed");
   });
@@ -730,10 +1021,62 @@ function renderWorkflowDetail(step = selectedWorkflowStep) {
   });
 }
 
+function mountWorkflowTooltip() {
+  if (workflowTooltipEl && workflowTooltipEl.parentElement !== document.body) {
+    document.body.appendChild(workflowTooltipEl);
+  }
+}
+
+function positionWorkflowTooltip(target) {
+  if (!workflowTooltipEl || !target) return;
+  const targetRect = target.getBoundingClientRect();
+  const tooltipWidth = Math.min(560, window.innerWidth - 32);
+  const targetCenter = targetRect.left + targetRect.width / 2;
+  const left = Math.min(Math.max(targetCenter, 16 + tooltipWidth / 2), window.innerWidth - 16 - tooltipWidth / 2);
+  const belowTop = targetRect.bottom + 12;
+  const estimatedHeight = Math.min(420, window.innerHeight - 32);
+  const top = belowTop + estimatedHeight > window.innerHeight - 16
+    ? Math.max(16, targetRect.top - estimatedHeight - 12)
+    : belowTop;
+  workflowTooltipEl.style.setProperty("--tooltip-left", `${left}px`);
+  workflowTooltipEl.style.setProperty("--tooltip-top", `${top}px`);
+}
+
+function showWorkflowTooltip(step, target) {
+  if (workflowTooltipHideTimer) window.clearTimeout(workflowTooltipHideTimer);
+  workflowTooltipHideTimer = null;
+  mountWorkflowTooltip();
+  visibleWorkflowTooltipStep = step;
+  renderWorkflowDetail(step);
+  positionWorkflowTooltip(target);
+  workflowTooltipEl.hidden = false;
+}
+
+function hideWorkflowTooltip({ delay = 0 } = {}) {
+  if (workflowTooltipHideTimer) window.clearTimeout(workflowTooltipHideTimer);
+  workflowTooltipHideTimer = window.setTimeout(() => {
+    visibleWorkflowTooltipStep = null;
+    if (workflowTooltipEl) workflowTooltipEl.hidden = true;
+    workflowTooltipHideTimer = null;
+  }, delay);
+}
+
+function keepWorkflowTooltipOpen() {
+  if (workflowTooltipHideTimer) window.clearTimeout(workflowTooltipHideTimer);
+  workflowTooltipHideTimer = null;
+}
+
+function hideWorkflowTooltipNow() {
+  if (workflowTooltipHideTimer) window.clearTimeout(workflowTooltipHideTimer);
+  workflowTooltipHideTimer = null;
+  visibleWorkflowTooltipStep = null;
+  if (workflowTooltipEl) workflowTooltipEl.hidden = true;
+}
+
 function recordWorkflowEvent(event, step) {
   workflowEvents[step] = workflowEvents[step] || [];
   workflowEvents[step].push(event);
-  if (selectedWorkflowStep === step) renderWorkflowDetail(step);
+  if (visibleWorkflowTooltipStep === step) renderWorkflowDetail(step);
 }
 
 function addWorkflowActual(label, value, tone = "") {
@@ -848,43 +1191,56 @@ function addLog(event) {
   logsEl.scrollTop = logsEl.scrollHeight;
 }
 
-function setChip(id, label, value, active) {
+function setChip(id, label, value, active, iconName) {
   const chip = document.getElementById(id);
   chip.classList.toggle("on", Boolean(active));
   chip.replaceChildren();
+  const icon = document.createElement("span");
+  icon.className = "chip-icon";
+  icon.dataset.icon = iconName;
+  icon.setAttribute("aria-hidden", "true");
+  const copy = document.createElement("span");
+  copy.className = "chip-copy";
   const small = document.createElement("small");
   small.textContent = label;
   const strong = document.createElement("strong");
   strong.textContent = value;
-  chip.append(small, strong);
+  copy.append(small, strong);
+  chip.append(icon, copy);
+  refreshIcons(chip);
 }
 
 function setDeviceState(state) {
   if (!state) return;
-  setChip("lightChip", "Light", state.light ? "On" : "Off", state.light);
-  setChip("fanChip", "Fan", state.fan ? "On" : "Off", state.fan);
-  setChip("acChip", "AC", state.ac && state.ac.power ? "On" : "Off", state.ac && state.ac.power);
-  const temp = state.ac ? `${state.ac.temperature} C / L${state.ac.fan_level || state.ac.fanLevel || "--"}` : "--";
-  setChip("tempChip", "Climate", temp, Boolean(state.ac && state.ac.power));
+  setChip("lightChip", "Light", state.light ? "On" : "Off", state.light, "Lightbulb");
+  setChip("fanChip", "Fan", state.fan ? "On" : "Off", state.fan, "Fan");
+  const ac = state.ac || {};
+  const acPower = Boolean(ac.power);
+  setChip("acChip", "AC", acPower ? "On" : "Off", acPower, "Snowflake");
+  const temperature = ac.temperature ? `${ac.temperature} C` : "-- C";
+  const fanLevel = ac.fan_level || ac.fanLevel || "--";
+  const mode = ac.mode ? String(ac.mode).toLowerCase() : "auto";
+  const acSettings = state.ac ? `${temperature} / L${fanLevel} / ${mode}` : "--";
+  setChip("tempChip", "", acSettings, acPower, "Thermometer");
 }
 
 function canSendInSession(session) {
-  return session.history.length <= MAX_MESSAGES_PER_SESSION - 2;
+  return userMessageCount(session) < MAX_USER_MESSAGES_PER_SESSION;
 }
 
 function updateComposerState() {
   const session = getSession();
   const blockedByLimit = !canSendInSession(session);
   const canStop = isSending && !runReachedTerminal;
+  const hasPrompt = Boolean(promptInput.value.trim());
   promptInput.disabled = blockedByLimit;
-  sendButton.disabled = blockedByLimit || (isSending && runReachedTerminal);
-  sendButton.classList.toggle("stop-mode", canStop);
-  sendButton.setAttribute("aria-label", canStop ? "Stop response" : "Send message");
-  sendTextEl.textContent = canStop ? "Stop" : "Send";
-  sendIconEl.textContent = canStop ? "\u25a0" : "\u25b6";
+  sendButton.disabled = blockedByLimit || isSending || !hasPrompt;
+  sendButton.setAttribute("aria-label", "Send message");
+  sendTextEl.textContent = "Send";
+  setIcon(sendIconEl, "SendHorizontal");
+  stopButton.hidden = !canStop;
   limitNoticeEl.hidden = !blockedByLimit;
-  headerMessageCountEl.textContent = `${session.history.length}/${MAX_MESSAGES_PER_SESSION}`;
-  messageCountEl.textContent = `${session.history.length} of ${MAX_MESSAGES_PER_SESSION} messages used`;
+  messageCountEl.textContent = `${userMessageCount(session)} of ${MAX_USER_MESSAGES_PER_SESSION} user messages used`;
 }
 
 function renderSessionList() {
@@ -905,7 +1261,7 @@ function renderSessionList() {
     const meta = document.createElement("span");
     meta.className = "session-meta";
     const count = document.createElement("span");
-    count.textContent = `${session.history.length}/${MAX_MESSAGES_PER_SESSION}`;
+    count.textContent = `${userMessageCount(session)}/${MAX_USER_MESSAGES_PER_SESSION}`;
     const cost = document.createElement("span");
     cost.textContent = formatCost(session.usageTotals.costUsd);
     const date = document.createElement("span");
@@ -922,21 +1278,26 @@ function renderSessionList() {
     const menuTrigger = document.createElement("button");
     menuTrigger.type = "button";
     menuTrigger.className = "session-menu-trigger";
-    menuTrigger.textContent = "\u22ee";
     menuTrigger.setAttribute("aria-label", `Options for ${session.title || "New chat"}`);
     menuTrigger.disabled = isSending;
+    const menuIcon = document.createElement("span");
+    menuIcon.className = "button-icon";
+    menuIcon.dataset.icon = "MoreVertical";
+    menuIcon.setAttribute("aria-hidden", "true");
+    menuTrigger.appendChild(menuIcon);
 
     const menu = document.createElement("div");
     menu.className = "session-menu";
     menu.hidden = true;
     const rename = document.createElement("button");
     rename.type = "button";
-    rename.textContent = "Rename";
+    rename.className = "button-with-icon";
+    rename.append(iconSpan("Pencil"), document.createTextNode("Rename"));
     rename.addEventListener("click", () => renameSession(session));
     const remove = document.createElement("button");
     remove.type = "button";
-    remove.className = "danger";
-    remove.textContent = "Delete";
+    remove.className = "danger button-with-icon";
+    remove.append(iconSpan("Trash2"), document.createTextNode("Delete"));
     remove.addEventListener("click", () => deleteSession(session));
     menu.append(rename, remove);
 
@@ -957,6 +1318,7 @@ function renderSessionList() {
     });
     row.append(button, menuTrigger, menu);
     sessionListEl.appendChild(row);
+    refreshIcons(row);
   });
 }
 
@@ -982,14 +1344,43 @@ function deleteSession(session) {
   renderActiveSession();
 }
 
-function renderUsage() {
+function sumUsageTotals(sessionItems) {
+  return sessionItems.reduce((totals, session) => {
+    const usage = normalizeUsageTotals(session.usageTotals);
+    totals.inputTokens += usage.inputTokens;
+    totals.cacheHitInputTokens += usage.cacheHitInputTokens;
+    totals.cacheMissInputTokens += usage.cacheMissInputTokens;
+    totals.outputTokens += usage.outputTokens;
+    totals.totalTokens += usage.totalTokens;
+    totals.modelCalls += usage.modelCalls;
+    totals.costUsd += usage.costUsd;
+    totals.cacheHitInputCostUsd += usage.cacheHitInputCostUsd;
+    totals.cacheMissInputCostUsd += usage.cacheMissInputCostUsd;
+    totals.outputCostUsd += usage.outputCostUsd;
+    return totals;
+  }, emptyUsageTotals());
+}
+
+function grandUsageTotals() {
+  return sumUsageTotals(sessions);
+}
+
+function renderGrandUsage() {
+  const totals = grandUsageTotals();
+  grandTokensEl.textContent = formatNumber(totals.totalTokens);
+  grandCostEl.textContent = formatCost(totals.costUsd);
+}
+
+function renderActiveChatUsage() {
   const session = getSession();
   const totals = session.usageTotals;
-  const activeModel = session.model || modelNameEl.textContent;
-  const pricing = modelPricing(activeModel);
-  pricingLabelEl.textContent = pricing ? `${pricing.label} estimate` : "Model cost estimate unavailable";
   sessionTokensEl.textContent = formatNumber(totals.totalTokens);
   sessionCostEl.textContent = formatCost(totals.costUsd);
+}
+
+function renderUsagePanel() {
+  const session = getSession();
+  const totals = session.usageTotals;
   inputTokensEl.textContent = formatNumber(totals.inputTokens);
   cacheHitTokensEl.textContent = formatNumber(totals.cacheHitInputTokens);
   cacheMissTokensEl.textContent = formatNumber(totals.cacheMissInputTokens);
@@ -1046,6 +1437,23 @@ function renderUsage() {
     row.append(header, grid, costs);
     tokenCallsEl.appendChild(row);
   });
+}
+
+function renderUsage() {
+  renderGrandUsage();
+  renderActiveChatUsage();
+  renderUsagePanel();
+}
+
+function renderStatusIndicator(status, text) {
+  healthEl.className = `status-indicator ${status}`;
+  healthEl.replaceChildren();
+  const dot = document.createElement("span");
+  dot.className = "status-dot";
+  dot.setAttribute("aria-hidden", "true");
+  const label = document.createElement("span");
+  label.textContent = text;
+  healthEl.append(dot, label);
 }
 
 function renderActiveSession() {
@@ -1111,7 +1519,10 @@ function handleLifecycleEvent(event) {
     return;
   }
 
-  if (event.phase === "model_token") return;
+  if (event.phase === "model_token") {
+    appendStreamingAssistantToken(event.message);
+    return;
+  }
 
   addLog(event);
 
@@ -1121,11 +1532,12 @@ function handleLifecycleEvent(event) {
 
   if (event.phase === "final") {
     finishRunTrace("completed");
-    addMessage("assistant", event.message);
+    finalizeAssistantMessage(event.message);
+    const finalText = streamAssistantText || String(event.message || "");
     runReachedTerminal = true;
     const session = getSession(pendingSessionId || activeSessionId);
-    session.history.push({ id: newId(), role: "assistant", content: event.message, time: formatTime(), trace: null });
-    session.history = session.history.slice(-MAX_MESSAGES_PER_SESSION);
+    session.history.push({ id: newId(), role: "assistant", content: finalText, time: formatTime(), trace: null });
+    session.history = trimHistoryToUserLimit(session.history);
     touchSession(session);
     pendingSessionId = null;
     saveSessions();
@@ -1161,6 +1573,7 @@ async function sendPrompt(prompt, sessionId, userMessageId, historyForRequest) {
   pendingSessionId = sessionId;
   runHasToolCall = false;
   runReachedTerminal = false;
+  resetStreamingAssistant();
   resetWorkflow();
   isSending = true;
   currentAbortController = new AbortController();
@@ -1232,20 +1645,21 @@ async function refreshHealth() {
   try {
     const response = await fetch("/health", { cache: "no-store" });
     const health = await response.json();
-    healthEl.textContent = health.ok ? "Ready" : "Check setup";
-    healthEl.className = `status-pill ${health.ok ? "ok" : "warn"}`;
+    renderStatusIndicator(health.ok ? "ok" : "warn", health.ok ? "Ready" : "Setup");
     if (health.settings) {
       modelNameEl.textContent = health.settings.deepseek_model || "--";
       renderUsage();
     }
   } catch (_) {
-    healthEl.textContent = "Offline";
-    healthEl.className = "status-pill warn";
+    renderStatusIndicator("warn", "Offline");
   }
 }
 
 function autoSizePrompt() {
-  applyComposerHeight();
+  if (promptInput.style.height) return;
+  const height = `${Math.min(Math.max(promptInput.scrollHeight, 52), 132)}px`;
+  promptInput.style.height = height;
+  promptPreviewEl.style.height = height;
 }
 
 function expandedComposerHeight() {
@@ -1255,18 +1669,30 @@ function expandedComposerHeight() {
 }
 
 function applyComposerHeight() {
-  const pixels = `${composerExpanded ? expandedComposerHeight() : 112}px`;
-  promptInput.style.height = pixels;
-  promptPreviewEl.style.height = pixels;
+  const height = composerExpanded ? expandedComposerHeight() : 112;
+  promptInput.style.height = `${height}px`;
+  promptPreviewEl.style.height = `${height}px`;
+  updateScrollLatestButton();
+}
+
+function updateComposerExpandButton() {
+  if (!composerExpandEl) return;
+  composerExpandEl.setAttribute("aria-pressed", String(composerExpanded));
+  composerExpandEl.setAttribute("aria-label", composerExpanded ? "Collapse message editor" : "Expand message editor");
+  composerExpandEl.title = composerExpanded ? "Collapse message editor" : "Expand message editor";
+  setIcon(composerExpandEl.querySelector("[data-icon]"), composerExpanded ? "Minimize2" : "Maximize2");
 }
 
 function toggleComposerHeight() {
   composerExpanded = !composerExpanded;
-  composerExpandEl.setAttribute("aria-pressed", String(composerExpanded));
-  composerExpandEl.setAttribute("aria-label", composerExpanded ? "Collapse message editor" : "Expand message editor");
-  composerExpandEl.title = composerExpanded ? "Collapse message editor" : "Expand message editor";
-  composerExpandEl.querySelector("span").textContent = composerExpanded ? "⤡" : "⤢";
   applyComposerHeight();
+  updateComposerExpandButton();
+}
+
+function collapseComposer() {
+  composerExpanded = false;
+  applyComposerHeight();
+  updateComposerExpandButton();
 }
 
 function setComposerMode(mode) {
@@ -1298,16 +1724,15 @@ composer.addEventListener("submit", (event) => {
     return;
   }
 
-  const historyForRequest = session.history
-    .slice(-MAX_MESSAGES_PER_SESSION)
-    .map((item) => ({ role: item.role, content: item.content }));
-  if (session.history.length === 0 || session.title === "New chat") {
+  const historyForRequest = requestHistory(session.history);
+  if (userMessageCount(session) === 0 || session.title === "New chat") {
     session.title = deriveTitle(prompt);
   }
 
-  addMessage("user", prompt);
+  addMessage("user", prompt, formatTime(), { forceScroll: true });
   const userMessage = { id: newId(), role: "user", content: prompt, time: formatTime(), trace: null };
   session.history.push(userMessage);
+  session.history = trimHistoryToUserLimit(session.history);
   touchSession(session);
   saveSessions();
   renderSessionList();
@@ -1315,7 +1740,8 @@ composer.addEventListener("submit", (event) => {
 
   promptInput.value = "";
   setComposerMode("write");
-  autoSizePrompt();
+  collapseComposer();
+  updateComposerState();
   sendPrompt(prompt, session.id, userMessage.id, historyForRequest);
 });
 
@@ -1328,13 +1754,16 @@ promptInput.addEventListener("keydown", (event) => {
 
 promptInput.addEventListener("input", () => {
   autoSizePrompt();
+  updateComposerState();
   if (!promptPreviewEl.hidden) setMarkdown(promptPreviewEl, promptInput.value.trim() || "*Nothing to preview yet.*");
 });
 
 writeTabEl.addEventListener("click", () => setComposerMode("write"));
 previewTabEl.addEventListener("click", () => setComposerMode("preview"));
 composerExpandEl.addEventListener("click", toggleComposerHeight);
-window.addEventListener("resize", applyComposerHeight);
+window.addEventListener("resize", () => {
+  if (composerExpanded) applyComposerHeight();
+});
 
 document.getElementById("newChat").addEventListener("click", () => {
   if (isSending) return;
@@ -1348,36 +1777,27 @@ document.getElementById("newChat").addEventListener("click", () => {
   promptInput.focus();
 });
 
-document.getElementById("clearSession").addEventListener("click", () => {
-  if (isSending) return;
-  const session = getSession();
-  const hasContent = session.history.length || session.usageCalls.length;
-  if (hasContent && !window.confirm("Clear messages and token usage for this chat?")) return;
-  session.history = [];
-  session.usageTotals = emptyUsageTotals();
-  session.usageCalls = [];
-  session.title = "New chat";
-  touchSession(session);
-  saveSessions();
-  renderActiveSession();
-  promptInput.focus();
-});
-
-document.getElementById("resetUsage").addEventListener("click", () => {
-  if (isSending) return;
-  const session = getSession();
-  session.usageTotals = emptyUsageTotals();
-  session.usageCalls = [];
-  touchSession(session);
-  saveSessions();
-  renderUsage();
-  renderSessionList();
-});
-
-sendButton.addEventListener("click", (event) => {
-  if (!isSending || runReachedTerminal) return;
+stopButton.addEventListener("click", (event) => {
   event.preventDefault();
+  if (!isSending || runReachedTerminal) return;
   if (currentAbortController) currentAbortController.abort();
+});
+
+messagesEl.addEventListener("wheel", (event) => {
+  if (event.deltaY < 0) pauseAutoFollowForUserScroll();
+}, { passive: true });
+messagesEl.addEventListener("touchstart", (event) => {
+  lastTouchY = event.touches && event.touches.length ? event.touches[0].clientY : null;
+}, { passive: true });
+messagesEl.addEventListener("touchmove", (event) => {
+  const touch = event.touches && event.touches.length ? event.touches[0] : null;
+  if (touch && lastTouchY !== null && touch.clientY > lastTouchY) pauseAutoFollowForUserScroll();
+  if (touch) lastTouchY = touch.clientY;
+}, { passive: true });
+messagesEl.addEventListener("scroll", handleMessagesScroll);
+
+scrollLatestButton.addEventListener("click", () => {
+  scrollToLatest({ force: true });
 });
 
 function selectInspectorTab(name) {
@@ -1402,15 +1822,50 @@ document.addEventListener("click", (event) => {
 });
 
 railEl.querySelectorAll("[data-step]").forEach((item) => {
+  item.addEventListener("pointerenter", () => showWorkflowTooltip(item.dataset.step, item));
+  item.addEventListener("mouseenter", () => showWorkflowTooltip(item.dataset.step, item));
+  item.addEventListener("focus", () => showWorkflowTooltip(item.dataset.step, item));
+  item.addEventListener("pointerleave", () => hideWorkflowTooltip({ delay: 140 }));
+  item.addEventListener("mouseleave", () => hideWorkflowTooltip({ delay: 140 }));
+  item.addEventListener("blur", () => hideWorkflowTooltip({ delay: 80 }));
   item.addEventListener("click", () => {
     selectedWorkflowStep = item.dataset.step;
     renderWorkflowDetail();
   });
 });
 
-autoSizePrompt();
+if (workflowTooltipEl) {
+  workflowTooltipEl.addEventListener("pointerenter", keepWorkflowTooltipOpen);
+  workflowTooltipEl.addEventListener("mouseenter", keepWorkflowTooltipOpen);
+  workflowTooltipEl.addEventListener("pointerleave", () => hideWorkflowTooltip({ delay: 80 }));
+  workflowTooltipEl.addEventListener("mouseleave", () => hideWorkflowTooltip({ delay: 80 }));
+}
+
+collapseComposer();
 renderActiveSession();
 renderWorkflowDetail();
+refreshIcons();
 refreshHealth();
 refreshDeviceState();
 setInterval(refreshDeviceState, 5000);
+
+window.RoomApp = {
+  formatTraceDuration,
+  grandUsageTotals,
+  sumUsageTotals,
+  normalizeUsageTotals,
+  handleLifecycleEvent,
+  resetStreamingAssistant,
+  collapseComposer,
+  userMessageCount,
+  trimHistoryToUserLimit,
+  requestHistory,
+  shouldAutoFollow,
+  scrollToLatest,
+  updateScrollLatestButton,
+  formatClockTime,
+  collapseRunTrace,
+  expandRunTrace,
+  toggleRunTrace,
+  renderRunTrace,
+};

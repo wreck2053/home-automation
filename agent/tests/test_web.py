@@ -120,6 +120,7 @@ async def test_markdown_ui_assets_are_served_in_dependency_order() -> None:
     ) as client:
         index = await client.get("/")
         assets = [
+            await client.get("/static/vendor/lucide.min.js"),
             await client.get("/static/vendor/marked.umd.js"),
             await client.get("/static/vendor/purify.min.js"),
             await client.get("/static/vendor/highlight.min.js"),
@@ -130,10 +131,30 @@ async def test_markdown_ui_assets_are_served_in_dependency_order() -> None:
     assert index.status_code == 200
     assert all(response.status_code == 200 for response in assets)
     html = index.text
+    assert "LANGGRAPH LOCAL" not in html
+    assert "LANGGRAPH" not in html
+    assert "Room assistant for Rahul's bedroom" not in html
+    assert html.index("lucide.min.js") < html.index("marked.umd.js")
     assert html.index("marked.umd.js") < html.index("purify.min.js")
     assert html.index("purify.min.js") < html.index("highlight.min.js")
     assert html.index("highlight.min.js") < html.index("markdown.js")
     assert html.index("markdown.js") < html.index("tool-progress.js")
     assert html.index("tool-progress.js") < html.index("app.js")
     assert 'id="composerExpand"' in html
-    assert "composerResizeHandle" not in html
+    assert 'data-icon="Maximize2"' in html
+    assert 'data-icon="DatabaseZap"' in html
+    assert 'data-icon="BrainCircuit"' in html
+    assert 'data-icon="Wrench"' in html
+    assert 'data-icon="RefreshCw"' in html
+    assert 'data-icon="MessageSquareText"' in html
+    assert 'data-icon="Lightbulb"' in html
+    assert 'data-icon="Fan"' in html
+    assert 'data-icon="Snowflake"' in html
+    assert 'data-icon="Thermometer"' in html
+    assert 'aria-label="AC settings"' in html
+    assert "Climate" not in html
+    assert 'id="stopResponse"' in html
+    assert 'id="scrollLatest"' in html
+    assert 'id="clearSession"' not in html
+    assert 'id="resetUsage"' not in html
+    assert 'class="usage-actions"' not in html

@@ -7,6 +7,7 @@
     <title>Deepsy Room Assistant</title>
     <link rel="stylesheet" href="/static/vendor/highlight-theme.css">
     <link rel="stylesheet" href="/static/app.css">
+    <script src="/static/vendor/lucide.min.js" defer></script>
     <script src="/static/vendor/marked.umd.js" defer></script>
     <script src="/static/vendor/purify.min.js" defer></script>
     <script src="/static/vendor/highlight.min.js" defer></script>
@@ -18,38 +19,32 @@
     <main class="shell">
       <header class="topbar">
         <div class="brand-block">
-          <p class="eyebrow">LANGGRAPH LOCAL</p>
-          <h1>Deepsy</h1>
-          <p class="subtitle">Room assistant for Rahul's bedroom</p>
+          <div class="brand-line">
+            <div class="brand-identity">
+              <h1>Deepsy</h1>
+              <span class="model-chip" id="modelName">--</span>
+            </div>
+            <section class="state-strip" aria-label="Current room state">
+              <span class="chip" id="lightChip"><span class="chip-icon" data-icon="Lightbulb" aria-hidden="true"></span><span class="chip-copy"><small>Light</small><strong>--</strong></span></span>
+              <span class="chip" id="fanChip"><span class="chip-icon" data-icon="Fan" aria-hidden="true"></span><span class="chip-copy"><small>Fan</small><strong>--</strong></span></span>
+              <span class="chip" id="acChip"><span class="chip-icon" data-icon="Snowflake" aria-hidden="true"></span><span class="chip-copy"><small>AC</small><strong>--</strong></span></span>
+              <span class="chip value-only" id="tempChip" aria-label="AC settings"><span class="chip-icon" data-icon="Thermometer" aria-hidden="true"></span><span class="chip-copy"><small aria-hidden="true"></small><strong>--</strong></span></span>
+            </section>
+          </div>
         </div>
 
-        <div class="top-metrics" aria-label="Current chat usage summary">
-          <div class="metric wide">
-            <span>Model</span>
-            <strong id="modelName">--</strong>
+        <div class="top-metrics" aria-label="Grand usage summary">
+          <div class="grand-metric">
+            <span>Grand Total Tokens</span>
+            <strong id="grandTokens">0</strong>
           </div>
-          <div class="metric">
-            <span>Messages</span>
-            <strong id="headerMessageCount">0/20</strong>
+          <div class="grand-metric">
+            <span>Grand Total Cost</span>
+            <strong id="grandCost">$0.000000</strong>
           </div>
-          <div class="metric">
-            <span>Tokens</span>
-            <strong id="sessionTokens">0</strong>
-          </div>
-          <div class="metric">
-            <span>Cost</span>
-            <strong id="sessionCost">$0.000000</strong>
-          </div>
-          <span class="status-pill" id="health">Checking</span>
+          <span class="status-indicator" id="health"><span class="status-dot" aria-hidden="true"></span><span>Checking</span></span>
         </div>
       </header>
-
-      <section class="state-strip" aria-label="Current room state">
-        <span class="chip" id="lightChip"><small>Light</small><strong>--</strong></span>
-        <span class="chip" id="fanChip"><small>Fan</small><strong>--</strong></span>
-        <span class="chip" id="acChip"><small>AC</small><strong>--</strong></span>
-        <span class="chip" id="tempChip"><small>Climate</small><strong>--</strong></span>
-      </section>
 
       <section class="dashboard">
         <aside class="panel sessions-panel" aria-label="Chat sessions">
@@ -58,36 +53,41 @@
               <h2>Chats</h2>
               <p>Local browser sessions</p>
             </div>
-            <button class="primary-small" id="newChat" type="button"><span aria-hidden="true">+</span> New</button>
+            <button class="primary-small button-with-icon" id="newChat" type="button"><span class="button-icon" data-icon="Plus" aria-hidden="true"></span><span>New</span></button>
           </div>
           <div class="session-list" id="sessionList" aria-live="polite"></div>
         </aside>
 
         <section class="panel chat-panel" aria-label="Chat">
           <div class="panel-head chat-head">
-            <div>
+            <div class="chat-title-block">
               <h2 id="activeSessionTitle">New chat</h2>
-              <p id="messageCount">0 of 20 messages used</p>
+              <p id="messageCount">0 of 10 user messages used</p>
             </div>
-            <button class="ghost-button" id="clearSession" type="button"><span aria-hidden="true">&#10005;</span> Clear</button>
+            <div class="chat-header-usage" aria-label="Current chat usage">
+              <span><small>Tokens</small><strong id="sessionTokens">0</strong></span>
+              <span><small>Cost</small><strong id="sessionCost">$0.000000</strong></span>
+            </div>
           </div>
           <div class="messages" id="messages" aria-live="polite"></div>
+          <button class="scroll-latest" id="scrollLatest" type="button" aria-label="Jump to latest message" hidden><span class="button-icon" data-icon="ArrowDown" aria-hidden="true"></span></button>
           <div class="limit-notice" id="limitNotice" hidden>
-            This chat has reached 20 messages. Clear this session or start a new chat to continue.
+            This chat has reached 10 user messages. Start a new chat to continue.
           </div>
           <form class="composer" id="composer">
             <div class="composer-main">
               <div class="composer-tabs" role="tablist" aria-label="Message editor mode">
                 <button class="composer-tab active" id="writeTab" type="button" role="tab" aria-selected="true" aria-controls="prompt">Write</button>
                 <button class="composer-tab" id="previewTab" type="button" role="tab" aria-selected="false" aria-controls="promptPreview">Preview</button>
-                <button class="composer-expand" id="composerExpand" type="button" aria-pressed="false" aria-label="Expand message editor" title="Expand message editor"><span aria-hidden="true">⤢</span></button>
+                <button class="composer-expand" id="composerExpand" type="button" aria-pressed="false" aria-label="Expand message editor" title="Expand message editor"><span class="button-icon" data-icon="Maximize2" aria-hidden="true"></span></button>
                 <span>Markdown supported</span>
               </div>
               <textarea id="prompt" name="prompt" autocomplete="off" rows="2" aria-label="Message Deepsy" required></textarea>
               <div class="composer-preview markdown" id="promptPreview" role="tabpanel" aria-labelledby="previewTab" hidden></div>
-            </div>
-            <div class="composer-actions">
-              <button id="send" type="submit" aria-label="Send message"><span id="sendText">Send</span> <span id="sendIcon" aria-hidden="true">&#9654;</span></button>
+              <div class="composer-actions" aria-label="Message actions">
+                <button class="stop-button" id="stopResponse" type="button" aria-label="Stop response" hidden><span class="button-icon" data-icon="Square" aria-hidden="true"></span></button>
+                <button class="send-button" id="send" type="submit" aria-label="Send message"><span class="button-icon" id="sendIcon" data-icon="SendHorizontal" aria-hidden="true"></span><span id="sendText">Send</span></button>
+              </div>
             </div>
           </form>
         </section>
@@ -99,15 +99,6 @@
           </div>
 
           <section class="panel usage-panel" id="usagePanel" role="tabpanel" aria-labelledby="usageTab" hidden>
-            <div class="panel-head compact">
-              <div>
-                <h2>Token Usage</h2>
-                <p id="pricingLabel">Model estimate</p>
-              </div>
-              <div class="panel-actions">
-                <button class="ghost-button" id="resetUsage" type="button"><span aria-hidden="true">&#8635;</span> Reset</button>
-              </div>
-            </div>
             <div class="usage-summary">
               <div><span>Cache Hit</span><strong id="cacheHitTokens">0</strong></div>
               <div><span>Cache Miss</span><strong id="cacheMissTokens">0</strong></div>
@@ -125,13 +116,13 @@
           <section class="panel log-panel" id="workflowPanel" role="tabpanel" aria-labelledby="workflowTab" aria-label="LangGraph workflow logs">
             <div class="workflow-overview">
               <div class="workflow-rail" id="workflowRail" aria-label="Workflow steps">
-                <button class="workflow-step" type="button" data-step="load_state" aria-pressed="true"><i></i><b>Load</b><small>state</small></button>
-                <button class="workflow-step" type="button" data-step="model" aria-pressed="false"><i></i><b>Model</b><small>reason</small></button>
-                <button class="workflow-step" type="button" data-step="tools" aria-pressed="false"><i></i><b>Tools</b><small>act</small></button>
-                <button class="workflow-step" type="button" data-step="load_state_after_tools" aria-pressed="false"><i></i><b>Refresh</b><small>state</small></button>
-                <button class="workflow-step" type="button" data-step="final" aria-pressed="false"><i></i><b>Final</b><small>reply</small></button>
+                <button class="workflow-step" type="button" data-step="load_state" aria-pressed="true"><span class="workflow-icon" data-icon="DatabaseZap" aria-hidden="true"></span><b>Load</b><small>state</small></button>
+                <button class="workflow-step" type="button" data-step="model" aria-pressed="false"><span class="workflow-icon" data-icon="BrainCircuit" aria-hidden="true"></span><b>Model</b><small>reason</small></button>
+                <button class="workflow-step" type="button" data-step="tools" aria-pressed="false"><span class="workflow-icon" data-icon="Wrench" aria-hidden="true"></span><b>Tools</b><small>act</small></button>
+                <button class="workflow-step" type="button" data-step="load_state_after_tools" aria-pressed="false"><span class="workflow-icon" data-icon="RefreshCw" aria-hidden="true"></span><b>Refresh</b><small>state</small></button>
+                <button class="workflow-step" type="button" data-step="final" aria-pressed="false"><span class="workflow-icon" data-icon="MessageSquareText" aria-hidden="true"></span><b>Final</b><small>reply</small></button>
               </div>
-              <section class="workflow-detail" aria-live="polite">
+              <section class="workflow-tooltip" id="workflowTooltip" aria-live="polite" hidden>
                 <div class="workflow-detail-copy">
                   <span id="workflowDetailKicker">Awaiting a run</span>
                   <h3 id="workflowDetailTitle">Load state</h3>
