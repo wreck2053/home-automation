@@ -29,4 +29,10 @@ The web UI defaults to `http://127.0.0.1:8000`.
 
 ```sh
 uv run pytest
+npm install
+npm test
 ```
+
+The browser dependencies are pinned in `package.json` and copied into the
+packaged static directory by `npm install`, so the local UI does not depend on
+a CDN at runtime.

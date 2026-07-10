@@ -12,4 +12,5 @@ __pycache__/
 mobileApp/ios
 mobileApp/android
 mobileApp/node_modules
+agent/node_modules
 include/Secrets.h

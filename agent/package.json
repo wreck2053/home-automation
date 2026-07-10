@@ -1,0 +1,15 @@
+{
+  "name": "home-automation-room-agent-ui",
+  "private": true,
+  "scripts": {
+    "vendor": "mkdir -p src/room_agent/static/vendor && cp node_modules/marked/lib/marked.umd.js src/room_agent/static/vendor/marked.umd.js && cp node_modules/dompurify/dist/purify.min.js src/room_agent/static/vendor/purify.min.js && cp node_modules/@highlightjs/cdn-assets/highlight.min.js src/room_agent/static/vendor/highlight.min.js && cp node_modules/@highlightjs/cdn-assets/styles/github-dark.min.css src/room_agent/static/vendor/highlight-theme.css",
+    "postinstall": "npm run vendor",
+    "test": "node --test tests/ui-*.test.mjs"
+  },
+  "devDependencies": {
+    "@highlightjs/cdn-assets": "11.11.1",
+    "dompurify": "3.4.11",
+    "jsdom": "29.1.1",
+    "marked": "18.0.6"
+  }
+}

@@ -2,6 +2,10 @@ const messagesEl = document.getElementById("messages");
 const logsEl = document.getElementById("logs");
 const composer = document.getElementById("composer");
 const promptInput = document.getElementById("prompt");
+const promptPreviewEl = document.getElementById("promptPreview");
+const writeTabEl = document.getElementById("writeTab");
+const previewTabEl = document.getElementById("previewTab");
+const composerExpandEl = document.getElementById("composerExpand");
 const sendButton = document.getElementById("send");
 const sendTextEl = document.getElementById("sendText");
 const sendIconEl = document.getElementById("sendIcon");
@@ -32,6 +36,8 @@ const usagePanel = document.getElementById("usagePanel");
 const workflowPanel = document.getElementById("workflowPanel");
 const usageTab = document.getElementById("usageTab");
 const workflowTab = document.getElementById("workflowTab");
+const { setMarkdown } = window.RoomMarkdown;
+const { resolveToolResult, failPendingToolCalls } = window.RoomToolProgress;
 
 const MAX_MESSAGES_PER_SESSION = 20;
 
@@ -89,6 +95,7 @@ let sessions = loadSessions();
 let activeSessionId = loadActiveSessionId();
 let selectedWorkflowStep = "load_state";
 let workflowEvents = {};
+let composerExpanded = false;
 
 // Persist normalized sessions so saved Flash calls are repriced with Flash rates on reload.
 saveSessions();
@@ -374,147 +381,6 @@ function deriveTitle(text) {
   return cleaned.length > 44 ? `${cleaned.slice(0, 41)}...` : cleaned;
 }
 
-function escapeHtml(value) {
-  return String(value)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-function escapeAttribute(value) {
-  return escapeHtml(value).replace(/`/g, "&#96;");
-}
-
-function safeUrl(value) {
-  const normalized = String(value).replace(/&amp;/g, "&").trim();
-  const lower = normalized.toLowerCase();
-  if (lower.startsWith("https://") || lower.startsWith("http://") || lower.startsWith("mailto:")) {
-    return normalized;
-  }
-  return "";
-}
-
-function renderInline(raw) {
-  let text = escapeHtml(raw);
-  const codeSpans = [];
-  text = text.replace(/`([^`]+)`/g, (_, code) => {
-    const token = `@@CODE_${codeSpans.length}@@`;
-    codeSpans.push(`<code>${code}</code>`);
-    return token;
-  });
-  text = text.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (match, label, url) => {
-    const href = safeUrl(url);
-    if (!href) return label;
-    return `<a href="${escapeAttribute(href)}" target="_blank" rel="noopener noreferrer">${label}</a>`;
-  });
-  text = text.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-  text = text.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
-  codeSpans.forEach((code, index) => {
-    text = text.replace(`@@CODE_${index}@@`, code);
-  });
-  return text;
-}
-
-function renderMarkdown(markdown) {
-  const lines = String(markdown || "").replace(/\r\n/g, "\n").split("\n");
-  const html = [];
-  let paragraph = [];
-  let listType = null;
-  let listItems = [];
-
-  function flushParagraph() {
-    if (!paragraph.length) return;
-    html.push(`<p>${renderInline(paragraph.join("\n")).replace(/\n/g, "<br>")}</p>`);
-    paragraph = [];
-  }
-
-  function flushList() {
-    if (!listType) return;
-    const tag = listType;
-    html.push(`<${tag}>${listItems.map((item) => `<li>${renderInline(item)}</li>`).join("")}</${tag}>`);
-    listType = null;
-    listItems = [];
-  }
-
-  function startList(type, item) {
-    flushParagraph();
-    if (listType && listType !== type) flushList();
-    listType = type;
-    listItems.push(item);
-  }
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const trimmed = line.trim();
-
-    if (trimmed.startsWith("```")) {
-      flushParagraph();
-      flushList();
-      const code = [];
-      index += 1;
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
-        code.push(lines[index]);
-        index += 1;
-      }
-      html.push(`<pre><code>${escapeHtml(code.join("\n"))}</code></pre>`);
-      continue;
-    }
-
-    if (!trimmed) {
-      flushParagraph();
-      flushList();
-      continue;
-    }
-
-    const heading = /^(#{1,2})\s+(.+)$/.exec(trimmed);
-    if (heading) {
-      flushParagraph();
-      flushList();
-      const level = heading[1].length;
-      html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`);
-      continue;
-    }
-
-    const quote = /^>\s?(.+)$/.exec(line);
-    if (quote) {
-      flushParagraph();
-      flushList();
-      const parts = [quote[1]];
-      while (index + 1 < lines.length && /^>\s?(.+)$/.test(lines[index + 1])) {
-        index += 1;
-        parts.push(lines[index].replace(/^>\s?/, ""));
-      }
-      html.push(`<blockquote>${renderInline(parts.join("\n")).replace(/\n/g, "<br>")}</blockquote>`);
-      continue;
-    }
-
-    const unordered = /^\s*[-*]\s+(.+)$/.exec(line);
-    if (unordered) {
-      startList("ul", unordered[1]);
-      continue;
-    }
-
-    const ordered = /^\s*\d+\.\s+(.+)$/.exec(line);
-    if (ordered) {
-      startList("ol", ordered[1]);
-      continue;
-    }
-
-    flushList();
-    paragraph.push(line);
-  }
-
-  flushParagraph();
-  flushList();
-  return html.join("");
-}
-
-function setMarkdown(target, markdown) {
-  target.innerHTML = renderMarkdown(markdown);
-}
-
 function addMessage(role, text, timestamp = formatTime()) {
   const row = document.createElement("div");
   row.className = `message-row ${role}`;
@@ -554,6 +420,12 @@ function formatTraceDuration(durationMs) {
 }
 
 function traceSummary(trace, live = false) {
+  const actions = trace.steps.filter((step) => step.type === "tool_call");
+  if (actions.length) {
+    const completed = actions.filter((step) => step.success === true).length;
+    const failed = actions.filter((step) => step.success === false).length;
+    return `Room actions · ${completed}/${actions.length} complete${failed ? ` · ${failed} failed` : ""}`;
+  }
   const duration = live ? Date.now() - trace.startedAt : trace.durationMs;
   const prefix = {
     running: "Working for",
@@ -592,7 +464,8 @@ function createRunTrace() {
 
 function renderTraceStep(step) {
   const item = document.createElement("article");
-  item.className = `trace-step ${step.type} ${step.success === false ? "failed" : ""}`.trim();
+  const stateClass = step.success === true ? "succeeded" : step.success === false ? "failed" : "pending";
+  item.className = `trace-step ${step.type} ${stateClass}`.trim();
   const marker = document.createElement("span");
   marker.className = "trace-marker";
   marker.setAttribute("aria-hidden", "true");
@@ -724,6 +597,7 @@ function finishRunTrace(status) {
   if (status === "completed" && activeTrace.steps.length === 0) {
     appendTraceStep({ type: "direct", title: "Direct response", content: "Answered without calling room tools." });
   }
+  failPendingToolCalls(activeTrace.steps, status);
   activeTrace.status = status;
   activeTrace.durationMs = Date.now() - activeTrace.startedAt;
   activeTrace.lastUpdatedAt = Date.now();
@@ -773,28 +647,40 @@ function updateTraceFromLifecycle(event) {
   } else if (event.phase === "model_start") {
     setTraceActivity(runHasToolCall || event.heading === "Model Response" ? "Preparing the final response" : "Deepsy is reasoning");
   } else if (event.phase === "model_intermediate") {
-    appendTraceStep({ type: "model", title: "Intermediate model output", content: event.message });
     setTraceActivity("Preparing a tool call");
   } else if (event.phase === "tool_call") {
     runHasToolCall = true;
     const toolCall = event.payload && event.payload.tool_call;
+    const actionNumber = activeTrace ? activeTrace.steps.filter((step) => step.type === "tool_call").length + 1 : 1;
     appendTraceStep({
       type: "tool_call",
-      title: `Tool call: ${(toolCall && toolCall.name) || "unknown"}`,
-      content: friendlyToolStatus(event).replace(/^Running:\s*/, ""),
+      title: `${actionNumber}. ${friendlyToolStatus(event).replace(/^Running:\s*/, "")}`,
+      content: "Waiting for the room controller",
       toolCallId: (toolCall && toolCall.id) || "",
       args: sanitizeTraceValue((toolCall && toolCall.args) || {}),
     });
     setTraceActivity(friendlyToolStatus(event));
   } else if (event.phase === "tool_result") {
     const result = event.payload && event.payload.result;
-    appendTraceStep({
-      type: "tool_result",
-      title: result && result.success === false ? "Tool failed" : "Tool result",
-      content: event.message,
-      toolCallId: (event.payload && event.payload.tool_call_id) || "",
+    const toolCallId = (event.payload && event.payload.tool_call_id) || "";
+    const matched = activeTrace && resolveToolResult(activeTrace.steps, {
+      toolCallId,
       success: !(result && result.success === false),
+      content: event.message,
+      elapsedMs: Date.now() - activeTrace.startedAt,
     });
+    if (matched) {
+      persistActiveTrace();
+      refreshActiveTraceView();
+    } else {
+      appendTraceStep({
+        type: "tool_result",
+        title: result && result.success === false ? "Unmatched tool failure" : "Unmatched tool result",
+        content: event.message,
+        toolCallId,
+        success: !(result && result.success === false),
+      });
+    }
     setTraceActivity(result && result.success === false ? "Action failed; preparing a safe response" : "Action completed; verifying room state");
   } else if (event.phase === "phase_start" && node === "load_state_after_tools") {
     setTraceActivity("Verifying the updated room state");
@@ -1359,8 +1245,45 @@ async function refreshHealth() {
 }
 
 function autoSizePrompt() {
-  promptInput.style.height = "auto";
-  promptInput.style.height = `${Math.min(promptInput.scrollHeight, 132)}px`;
+  applyComposerHeight();
+}
+
+function expandedComposerHeight() {
+  const chatPanel = composer.closest(".chat-panel");
+  const panelHeight = chatPanel ? chatPanel.clientHeight : Math.floor(window.innerHeight * 0.75);
+  return Math.max(180, Math.min(360, Math.floor(panelHeight * 0.48)));
+}
+
+function applyComposerHeight() {
+  const pixels = `${composerExpanded ? expandedComposerHeight() : 112}px`;
+  promptInput.style.height = pixels;
+  promptPreviewEl.style.height = pixels;
+}
+
+function toggleComposerHeight() {
+  composerExpanded = !composerExpanded;
+  composerExpandEl.setAttribute("aria-pressed", String(composerExpanded));
+  composerExpandEl.setAttribute("aria-label", composerExpanded ? "Collapse message editor" : "Expand message editor");
+  composerExpandEl.title = composerExpanded ? "Collapse message editor" : "Expand message editor";
+  composerExpandEl.querySelector("span").textContent = composerExpanded ? "⤡" : "⤢";
+  applyComposerHeight();
+}
+
+function setComposerMode(mode) {
+  const previewing = mode === "preview";
+  writeTabEl.classList.toggle("active", !previewing);
+  previewTabEl.classList.toggle("active", previewing);
+  writeTabEl.setAttribute("aria-selected", String(!previewing));
+  previewTabEl.setAttribute("aria-selected", String(previewing));
+  promptInput.hidden = previewing;
+  promptInput.required = !previewing;
+  promptPreviewEl.hidden = !previewing;
+  if (previewing) {
+    const markdown = promptInput.value.trim();
+    setMarkdown(promptPreviewEl, markdown || "*Nothing to preview yet.*");
+  } else if (!promptInput.disabled) {
+    promptInput.focus();
+  }
 }
 
 composer.addEventListener("submit", (event) => {
@@ -1391,6 +1314,7 @@ composer.addEventListener("submit", (event) => {
   updateComposerState();
 
   promptInput.value = "";
+  setComposerMode("write");
   autoSizePrompt();
   sendPrompt(prompt, session.id, userMessage.id, historyForRequest);
 });
@@ -1402,7 +1326,15 @@ promptInput.addEventListener("keydown", (event) => {
   }
 });
 
-promptInput.addEventListener("input", autoSizePrompt);
+promptInput.addEventListener("input", () => {
+  autoSizePrompt();
+  if (!promptPreviewEl.hidden) setMarkdown(promptPreviewEl, promptInput.value.trim() || "*Nothing to preview yet.*");
+});
+
+writeTabEl.addEventListener("click", () => setComposerMode("write"));
+previewTabEl.addEventListener("click", () => setComposerMode("preview"));
+composerExpandEl.addEventListener("click", toggleComposerHeight);
+window.addEventListener("resize", applyComposerHeight);
 
 document.getElementById("newChat").addEventListener("click", () => {
   if (isSending) return;
@@ -1476,6 +1408,7 @@ railEl.querySelectorAll("[data-step]").forEach((item) => {
   });
 });
 
+autoSizePrompt();
 renderActiveSession();
 renderWorkflowDetail();
 refreshHealth();

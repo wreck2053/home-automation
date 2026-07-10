@@ -5,7 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#090d12">
     <title>Deepsy Room Assistant</title>
+    <link rel="stylesheet" href="/static/vendor/highlight-theme.css">
     <link rel="stylesheet" href="/static/app.css">
+    <script src="/static/vendor/marked.umd.js" defer></script>
+    <script src="/static/vendor/purify.min.js" defer></script>
+    <script src="/static/vendor/highlight.min.js" defer></script>
+    <script src="/static/markdown.js" defer></script>
+    <script src="/static/tool-progress.js" defer></script>
     <script src="/static/app.js" defer></script>
   </head>
   <body>
@@ -70,7 +76,16 @@
             This chat has reached 20 messages. Clear this session or start a new chat to continue.
           </div>
           <form class="composer" id="composer">
-            <textarea id="prompt" name="prompt" autocomplete="off" rows="2" aria-label="Message Deepsy" required></textarea>
+            <div class="composer-main">
+              <div class="composer-tabs" role="tablist" aria-label="Message editor mode">
+                <button class="composer-tab active" id="writeTab" type="button" role="tab" aria-selected="true" aria-controls="prompt">Write</button>
+                <button class="composer-tab" id="previewTab" type="button" role="tab" aria-selected="false" aria-controls="promptPreview">Preview</button>
+                <button class="composer-expand" id="composerExpand" type="button" aria-pressed="false" aria-label="Expand message editor" title="Expand message editor"><span aria-hidden="true">⤢</span></button>
+                <span>Markdown supported</span>
+              </div>
+              <textarea id="prompt" name="prompt" autocomplete="off" rows="2" aria-label="Message Deepsy" required></textarea>
+              <div class="composer-preview markdown" id="promptPreview" role="tabpanel" aria-labelledby="previewTab" hidden></div>
+            </div>
             <div class="composer-actions">
               <button id="send" type="submit" aria-label="Send message"><span id="sendText">Send</span> <span id="sendIcon" aria-hidden="true">&#9654;</span></button>
             </div>
