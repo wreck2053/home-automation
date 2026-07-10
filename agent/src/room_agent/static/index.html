@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#090d12">
+    <title>Deepsy Room Assistant</title>
+    <link rel="stylesheet" href="/static/app.css">
+    <script src="/static/app.js" defer></script>
+  </head>
+  <body>
+    <main class="shell">
+      <header class="topbar">
+        <div class="brand-block">
+          <p class="eyebrow">LANGGRAPH LOCAL</p>
+          <h1>Deepsy</h1>
+          <p class="subtitle">Room assistant for Rahul's bedroom</p>
+        </div>
+
+        <div class="top-metrics" aria-label="Current chat usage summary">
+          <div class="metric wide">
+            <span>Model</span>
+            <strong id="modelName">--</strong>
+          </div>
+          <div class="metric">
+            <span>Messages</span>
+            <strong id="headerMessageCount">0/20</strong>
+          </div>
+          <div class="metric">
+            <span>Tokens</span>
+            <strong id="sessionTokens">0</strong>
+          </div>
+          <div class="metric">
+            <span>Cost</span>
+            <strong id="sessionCost">$0.000000</strong>
+          </div>
+          <span class="status-pill" id="health">Checking</span>
+        </div>
+      </header>
+
+      <section class="state-strip" aria-label="Current room state">
+        <span class="chip" id="lightChip"><small>Light</small><strong>--</strong></span>
+        <span class="chip" id="fanChip"><small>Fan</small><strong>--</strong></span>
+        <span class="chip" id="acChip"><small>AC</small><strong>--</strong></span>
+        <span class="chip" id="tempChip"><small>Climate</small><strong>--</strong></span>
+      </section>
+
+      <section class="dashboard">
+        <aside class="panel sessions-panel" aria-label="Chat sessions">
+          <div class="panel-head">
+            <div>
+              <h2>Chats</h2>
+              <p>Local browser sessions</p>
+            </div>
+            <button class="primary-small" id="newChat" type="button"><span aria-hidden="true">+</span> New</button>
+          </div>
+          <div class="session-list" id="sessionList" aria-live="polite"></div>
+        </aside>
+
+        <section class="panel chat-panel" aria-label="Chat">
+          <div class="panel-head chat-head">
+            <div>
+              <h2 id="activeSessionTitle">New chat</h2>
+              <p id="messageCount">0 of 20 messages used</p>
+            </div>
+            <button class="ghost-button" id="clearSession" type="button"><span aria-hidden="true">&#10005;</span> Clear</button>
+          </div>
+          <div class="messages" id="messages" aria-live="polite"></div>
+          <div class="limit-notice" id="limitNotice" hidden>
+            This chat has reached 20 messages. Clear this session or start a new chat to continue.
+          </div>
+          <form class="composer" id="composer">
+            <textarea id="prompt" name="prompt" autocomplete="off" rows="2" aria-label="Message Deepsy" required></textarea>
+            <div class="composer-actions">
+              <button id="send" type="submit" aria-label="Send message"><span id="sendText">Send</span> <span id="sendIcon" aria-hidden="true">&#9654;</span></button>
+            </div>
+          </form>
+        </section>
+
+        <aside class="side-stack" aria-label="Workflow and token usage">
+          <div class="inspector-tabs" role="tablist" aria-label="Assistant inspection panels">
+            <button class="inspector-tab active" id="workflowTab" type="button" role="tab" aria-selected="true" aria-controls="workflowPanel">Workflow</button>
+            <button class="inspector-tab" id="usageTab" type="button" role="tab" aria-selected="false" aria-controls="usagePanel">Token Usage</button>
+          </div>
+
+          <section class="panel usage-panel" id="usagePanel" role="tabpanel" aria-labelledby="usageTab" hidden>
+            <div class="panel-head compact">
+              <div>
+                <h2>Token Usage</h2>
+                <p id="pricingLabel">Model estimate</p>
+              </div>
+              <div class="panel-actions">
+                <button class="ghost-button" id="resetUsage" type="button"><span aria-hidden="true">&#8635;</span> Reset</button>
+              </div>
+            </div>
+            <div class="usage-summary">
+              <div><span>Cache Hit</span><strong id="cacheHitTokens">0</strong></div>
+              <div><span>Cache Miss</span><strong id="cacheMissTokens">0</strong></div>
+              <div><span>Output</span><strong id="outputTokens">0</strong></div>
+              <div><span>Calls</span><strong id="modelCalls">0</strong></div>
+            </div>
+            <div class="usage-costs">
+              <span>Input <strong id="inputTokens">0</strong></span>
+              <span>Total <strong id="usageTotalTokens">0</strong></span>
+              <span>Cost <strong id="usageTotalCost">$0.000000</strong></span>
+            </div>
+            <div class="token-calls" id="tokenCalls" aria-live="polite"></div>
+          </section>
+
+          <section class="panel log-panel" id="workflowPanel" role="tabpanel" aria-labelledby="workflowTab" aria-label="LangGraph workflow logs">
+            <div class="workflow-overview">
+              <div class="workflow-rail" id="workflowRail" aria-label="Workflow steps">
+                <button class="workflow-step" type="button" data-step="load_state" aria-pressed="true"><i></i><b>Load</b><small>state</small></button>
+                <button class="workflow-step" type="button" data-step="model" aria-pressed="false"><i></i><b>Model</b><small>reason</small></button>
+                <button class="workflow-step" type="button" data-step="tools" aria-pressed="false"><i></i><b>Tools</b><small>act</small></button>
+                <button class="workflow-step" type="button" data-step="load_state_after_tools" aria-pressed="false"><i></i><b>Refresh</b><small>state</small></button>
+                <button class="workflow-step" type="button" data-step="final" aria-pressed="false"><i></i><b>Final</b><small>reply</small></button>
+              </div>
+              <section class="workflow-detail" aria-live="polite">
+                <div class="workflow-detail-copy">
+                  <span id="workflowDetailKicker">Awaiting a run</span>
+                  <h3 id="workflowDetailTitle">Load state</h3>
+                  <p id="workflowDetailMessage"></p>
+                </div>
+                <div class="workflow-actual" id="workflowDetailActual"></div>
+              </section>
+            </div>
+            <div class="logs" id="logs" aria-live="polite"></div>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>
