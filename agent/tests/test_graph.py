@@ -4,7 +4,7 @@ from typing import Any
 
 import httpx
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from room_agent.device import RoomDeviceClient
 from room_agent.graph import RoomAssistant
@@ -19,9 +19,19 @@ class FakeToolCallingModel:
         return self
 
     async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        system_text = next(
+            (
+                message.content
+                for message in messages
+                if isinstance(message, SystemMessage) and isinstance(message.content, str)
+            ),
+            "",
+        )
+        is_planner = "Internal planning step:" in system_text
+
         if any(isinstance(message, ToolMessage) for message in messages):
             return AIMessage(
-                content="Done.",
+                content="Room action complete." if is_planner else "Done.",
                 usage_metadata={
                     "input_tokens": 30,
                     "output_tokens": 5,
@@ -77,7 +87,7 @@ class FakeToolCallingModel:
                 },
             )
         return AIMessage(
-            content="Here is a small joke.",
+            content="No room action needed." if is_planner else "Here is a small joke.",
             usage_metadata={
                 "input_tokens": 18,
                 "output_tokens": 7,
@@ -116,10 +126,11 @@ async def test_general_chat_does_not_call_control_tools(mutable_device_transport
     assert all(not path.startswith("/toggle") for path in calls)
     assert any(event.phase == EventPhase.final for event in events)
     token_events = [event for event in events if event.phase == EventPhase.token_usage]
-    assert len(token_events) == 1
+    assert len(token_events) == 2
     assert token_events[0].payload["input_tokens"] == 18
     assert token_events[0].payload["cache_miss_input_tokens"] == 18
     assert token_events[0].payload["output_tokens"] == 7
+    assert token_events[1].payload["call_index"] == 2
 
 
 @pytest.mark.asyncio
@@ -137,7 +148,12 @@ async def test_dark_prompt_turns_light_on(mutable_device_transport) -> None:
     intermediate_events = [
         event for event in events if event.phase == EventPhase.model_intermediate
     ]
-    assert [event.message for event in intermediate_events] == [
+    tool_draft_events = [
+        event
+        for event in intermediate_events
+        if event.payload and event.payload.get("tool_call_count", 0) > 0
+    ]
+    assert [event.message for event in tool_draft_events] == [
         "I will turn on the light."
     ]
     intermediate_index = next(
@@ -159,10 +175,16 @@ async def test_dark_prompt_turns_light_on(mutable_device_transport) -> None:
         for event in events
     )
     token_events = [event for event in events if event.phase == EventPhase.token_usage]
-    assert len(token_events) == 2
-    assert [event.payload["call_index"] for event in token_events] == [1, 2]
+    assert len(token_events) == 3
+    assert [event.payload["call_index"] for event in token_events] == [1, 2, 3]
     assert token_events[0].payload["model"] == "unknown"
     assert "estimated_cache_miss_input_cost_usd" in token_events[0].payload
+    model_starts = [
+        event for event in events
+        if event.phase == EventPhase.model_start and event.payload
+    ]
+    assert model_starts[-1].payload["node"] == "final_model"
+    assert model_starts[-1].payload["response_target"] == "final"
 
 
 @pytest.mark.asyncio

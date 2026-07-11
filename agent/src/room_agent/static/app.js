@@ -54,6 +54,7 @@ const STORAGE_KEYS = {
 };
 
 const WORKFLOW_ORDER = ["load_state", "model", "tools", "load_state_after_tools", "final"];
+const MAX_MODEL_DRAFT_CHARS = 220;
 
 const WORKFLOW_DETAILS = {
   load_state: {
@@ -97,7 +98,12 @@ let activeTraceActivity = "";
 let traceTimer = null;
 let streamAssistantView = null;
 let streamAssistantText = "";
+let streamWorkingStepId = null;
 let streamAnimationTimer = null;
+let streamReplayTimer = null;
+let pendingModelChunks = [];
+let pendingModelText = "";
+let currentModelStreamTarget = "pending";
 let autoFollowLatest = true;
 let userScrollAwayIntentTimer = null;
 let userScrollAwayIntent = false;
@@ -130,6 +136,11 @@ function setIcon(target, iconName) {
     class: "lucide-icon",
   });
   target.appendChild(svg);
+}
+
+function cssEscape(value) {
+  if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(value);
+  return String(value).replace(/["\\]/g, "\\$&");
 }
 
 function refreshIcons(root = document) {
@@ -313,6 +324,7 @@ function normalizeTraceStep(raw) {
     toolCallId: String(source.toolCallId || ""),
     args: source.args && typeof source.args === "object" ? sanitizeTraceValue(source.args) : null,
     success: typeof source.success === "boolean" ? source.success : null,
+    streaming: source.streaming === true,
     elapsedMs: Math.max(0, Number(source.elapsedMs) || 0),
     createdAt: createdAt ? String(createdAt) : "",
   };
@@ -329,13 +341,19 @@ function normalizeRunTrace(raw) {
     status = "interrupted";
     durationMs = Math.max(durationMs, lastUpdatedAt - startedAt);
   }
+  const steps = Array.isArray(raw.steps) ? raw.steps.map(normalizeTraceStep) : [];
+  if (status !== "running") {
+    steps.forEach((step) => {
+      step.streaming = false;
+    });
+  }
   return {
     id: String(raw.id || newId()),
     status,
     startedAt,
     lastUpdatedAt,
     durationMs,
-    steps: Array.isArray(raw.steps) ? raw.steps.map(normalizeTraceStep) : [],
+    steps,
   };
 }
 
@@ -489,9 +507,13 @@ function updateScrollLatestButton({ syncFollow = false } = {}) {
   scrollLatestButton.hidden = isFollowingLatest() || atLatest;
 }
 
-function scrollToLatest({ force = false } = {}) {
+function scrollToLatest({ force = false, smooth = false } = {}) {
   if (force || isFollowingLatest() || (!userScrollAwayIntent && shouldAutoFollow())) {
-    messagesEl.scrollTop = messagesEl.scrollHeight;
+    if (smooth && typeof messagesEl.scrollTo === "function") {
+      messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: "smooth" });
+    } else {
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
     autoFollowLatest = true;
     userScrollAwayIntent = false;
     if (userScrollAwayIntentTimer) window.clearTimeout(userScrollAwayIntentTimer);
@@ -550,23 +572,31 @@ function addMessage(role, text, timestamp = formatTime(), options = {}) {
     row.append(avatar, bubble);
   }
   messagesEl.appendChild(row);
-  scrollToLatest({ force: shouldFollow });
+  scrollToLatest({ force: shouldFollow, smooth: Boolean(options.smoothScroll) });
   return { row, avatar, bubble, label, body };
 }
 
 function resetStreamingAssistant() {
   if (streamAnimationTimer) window.clearTimeout(streamAnimationTimer);
+  if (streamReplayTimer) window.clearTimeout(streamReplayTimer);
   streamAnimationTimer = null;
+  streamReplayTimer = null;
   if (streamAssistantView) {
     streamAssistantView.bubble.classList.remove("streaming", "streaming-tick");
   }
   streamAssistantView = null;
   streamAssistantText = "";
+  streamWorkingStepId = null;
+  pendingModelChunks = [];
+  pendingModelText = "";
+  currentModelStreamTarget = "pending";
 }
 
-function pulseStreamingAssistant() {
-  if (!streamAssistantView) return;
-  const bubble = streamAssistantView.bubble;
+function pulseStreamingTarget(target) {
+  const bubble = target === "working" && streamWorkingStepId
+    ? document.querySelector(`[data-trace-step-id="${cssEscape(streamWorkingStepId)}"] .trace-step-body`)
+    : streamAssistantView && streamAssistantView.bubble;
+  if (!bubble) return;
   bubble.classList.add("streaming");
   bubble.classList.remove("streaming-tick");
   bubble.getBoundingClientRect();
@@ -578,30 +608,174 @@ function pulseStreamingAssistant() {
   }, 180);
 }
 
-function appendStreamingAssistantToken(token) {
+function workingModelStep() {
+  if (!activeTrace || !streamWorkingStepId) return null;
+  return activeTrace.steps.find((step) => step.id === streamWorkingStepId) || null;
+}
+
+function modelDraftDisplayText(content) {
+  const text = String(content || "");
+  if (text.length <= MAX_MODEL_DRAFT_CHARS) return text;
+  return `${text.slice(0, MAX_MODEL_DRAFT_CHARS).trimEnd()}...`;
+}
+
+function ensureWorkingModelStep() {
+  if (!activeTrace) return null;
+  const current = workingModelStep();
+  if (current) return current;
+  const step = normalizeTraceStep({
+    id: newId(),
+    type: "model",
+    title: "Model response",
+    content: "",
+    success: null,
+    streaming: true,
+    elapsedMs: Date.now() - activeTrace.startedAt,
+    createdAt: nowIso(),
+  });
+  activeTrace.steps.push(step);
+  streamWorkingStepId = step.id;
+  persistActiveTrace();
+  refreshActiveTraceView();
+  return step;
+}
+
+function updateWorkingModelStepView(step) {
+  if (!activeTraceView || !step) return false;
+  const item = activeTraceView.timeline.querySelector(`[data-trace-step-id="${cssEscape(step.id)}"]`);
+  if (!item) return false;
+  const stateClass = step.success === true ? "succeeded" : step.success === false ? "failed" : "pending";
+  item.className = `trace-step ${step.type} ${stateClass} ${step.streaming ? "streaming" : ""}`.trim();
+  const status = item.querySelector(".trace-step-status");
+  if (status) status.textContent = step.streaming ? "Streaming" : `+${formatTraceDuration(step.elapsedMs)}`;
+  const body = item.querySelector(".trace-step-body");
+  if (body) {
+    body.classList.add("markdown");
+    setMarkdown(body, modelDraftDisplayText(step.content));
+  }
+  return true;
+}
+
+function appendWorkingModelToken(token) {
   const text = String(token || "");
   if (!text) return;
-  if (!streamAssistantView) {
-    streamAssistantView = addMessage("assistant", "");
-  }
-  streamAssistantText += text;
-  setMarkdown(streamAssistantView.body, streamAssistantText);
-  pulseStreamingAssistant();
+  const step = ensureWorkingModelStep();
+  if (!step || !activeTrace) return;
+  step.content += text;
+  step.streaming = true;
+  step.elapsedMs = Date.now() - activeTrace.startedAt;
+  persistActiveTrace();
+  if (!updateWorkingModelStepView(step)) refreshActiveTraceView();
+  pulseStreamingTarget("working");
   scrollToLatest();
 }
 
+function ensureAssistantStreamView() {
+  if (streamAssistantView) return streamAssistantView;
+  streamAssistantView = addMessage("assistant", "");
+  streamAssistantView.bubble.classList.add("streaming");
+  return streamAssistantView;
+}
+
+function appendStreamingAssistantToken(token) {
+  const text = String(token || "");
+  if (!text) return;
+  if (streamReplayTimer) {
+    window.clearTimeout(streamReplayTimer);
+    streamReplayTimer = null;
+  }
+  const view = ensureAssistantStreamView();
+  streamAssistantText += text;
+  setMarkdown(view.body, streamAssistantText);
+  pulseStreamingTarget("assistant");
+  scrollToLatest();
+}
+
+function appendPendingModelToken(token) {
+  const text = String(token || "");
+  if (!text) return;
+  pendingModelChunks.push(text);
+  pendingModelText += text;
+}
+
+function clearPendingModelText() {
+  pendingModelChunks = [];
+  pendingModelText = "";
+}
+
+function clearWorkingModelDraft({ removeStep = false } = {}) {
+  if (activeTrace && streamWorkingStepId) {
+    const step = workingModelStep();
+    if (step) {
+      step.streaming = false;
+      if (removeStep || !String(step.content || "").trim()) {
+        activeTrace.steps = activeTrace.steps.filter((item) => item.id !== streamWorkingStepId);
+      }
+      persistActiveTrace();
+      refreshActiveTraceView();
+    }
+  }
+  streamWorkingStepId = null;
+}
+
+function commitWorkingModelDraft(content = "") {
+  const step = workingModelStep();
+  const draft = modelDraftDisplayText(content || pendingModelText || (step && step.content) || "").trim();
+  clearPendingModelText();
+  if (!draft) return;
+  if (step) {
+    step.content = draft;
+    step.streaming = false;
+    step.success = true;
+    if (activeTrace) step.elapsedMs = Date.now() - activeTrace.startedAt;
+    persistActiveTrace();
+    refreshActiveTraceView();
+    streamWorkingStepId = null;
+    return;
+  }
+  appendTraceStep({ type: "model", title: "Model response", content: draft, success: true });
+}
+
 function finalizeAssistantMessage(content) {
-  const finalText = String(content || streamAssistantText || "");
+  const finalText = String(content || "");
   if (!finalText.trim()) return;
   if (streamAssistantView) {
+    if (streamReplayTimer) window.clearTimeout(streamReplayTimer);
+    streamReplayTimer = null;
     setMarkdown(streamAssistantView.body, finalText);
     streamAssistantView.bubble.classList.remove("streaming", "streaming-tick");
   } else {
-    streamAssistantView = addMessage("assistant", finalText);
+    replayAssistantMessage(finalText);
+    return;
   }
   if (streamAnimationTimer) window.clearTimeout(streamAnimationTimer);
   streamAnimationTimer = null;
   streamAssistantText = finalText;
+}
+
+function replayAssistantMessage(content) {
+  const finalText = String(content || "");
+  if (!finalText.trim()) return;
+  if (streamReplayTimer) window.clearTimeout(streamReplayTimer);
+  const view = ensureAssistantStreamView();
+  const chars = Array.from(finalText);
+  const chunkSize = Math.max(2, Math.ceil(chars.length / 48));
+  let index = 0;
+  streamAssistantText = "";
+  setMarkdown(view.body, "");
+  const tick = () => {
+    index = Math.min(chars.length, index + chunkSize);
+    streamAssistantText = chars.slice(0, index).join("");
+    setMarkdown(view.body, streamAssistantText);
+    pulseStreamingTarget("assistant");
+    if (index < chars.length) {
+      streamReplayTimer = window.setTimeout(tick, 16);
+      return;
+    }
+    view.bubble.classList.remove("streaming", "streaming-tick");
+    streamReplayTimer = null;
+  };
+  tick();
 }
 
 function formatTraceDuration(durationMs) {
@@ -667,7 +841,8 @@ function traceStepTimestamp(step, trace) {
 function renderTraceStep(step, trace = null) {
   const item = document.createElement("article");
   const stateClass = step.success === true ? "succeeded" : step.success === false ? "failed" : "pending";
-  item.className = `trace-step ${step.type} ${stateClass}`.trim();
+  item.className = `trace-step ${step.type} ${stateClass} ${step.streaming ? "streaming" : ""}`.trim();
+  item.dataset.traceStepId = step.id;
   const marker = document.createElement("span");
   marker.className = "trace-marker";
   marker.setAttribute("aria-hidden", "true");
@@ -677,17 +852,22 @@ function renderTraceStep(step, trace = null) {
   const title = document.createElement("strong");
   title.textContent = step.title;
   const elapsed = document.createElement("span");
+  elapsed.className = "trace-step-status";
   const createdAt = traceStepTimestamp(step, trace);
-  elapsed.textContent =
-    step.type === "tool_call" && createdAt && !Number.isNaN(createdAt.getTime())
-      ? formatClockTime(createdAt)
-      : `+${formatTraceDuration(step.elapsedMs)}`;
+  if (step.streaming) {
+    elapsed.textContent = "Streaming";
+  } else {
+    elapsed.textContent =
+      step.type === "tool_call" && createdAt && !Number.isNaN(createdAt.getTime())
+        ? formatClockTime(createdAt)
+        : `+${formatTraceDuration(step.elapsedMs)}`;
+  }
   header.append(title, elapsed);
   const body = document.createElement("div");
   body.className = "trace-step-body";
   if (step.type === "model") {
     body.classList.add("markdown");
-    setMarkdown(body, step.content);
+    setMarkdown(body, modelDraftDisplayText(step.content));
   } else {
     const message = document.createElement("p");
     message.textContent = step.content;
@@ -934,9 +1114,25 @@ function updateTraceFromLifecycle(event) {
   } else if (event.phase === "state_snapshot" && node === "load_state") {
     setTraceActivity("Room state loaded; choosing the next step");
   } else if (event.phase === "model_start") {
-    setTraceActivity(runHasToolCall || event.heading === "Model Response" ? "Preparing the final response" : "Deepsy is reasoning");
+    const target = event.payload && event.payload.response_target;
+    currentModelStreamTarget = target === "final" ? "final" : target === "pending" ? "pending" : "working";
+    if (currentModelStreamTarget === "final") {
+      clearPendingModelText();
+      clearWorkingModelDraft({ removeStep: true });
+      setTraceActivity("Preparing the final response");
+    } else {
+      setTraceActivity("Deepsy is reasoning");
+    }
   } else if (event.phase === "model_intermediate") {
-    setTraceActivity("Preparing a tool call");
+    const toolCallCount = Number(event.payload && event.payload.tool_call_count) || 0;
+    if (toolCallCount > 0) {
+      commitWorkingModelDraft(event.message);
+      setTraceActivity("Preparing a tool call");
+    } else {
+      clearPendingModelText();
+      clearWorkingModelDraft({ removeStep: true });
+      setTraceActivity("Preparing the final response");
+    }
   } else if (event.phase === "tool_call") {
     runHasToolCall = true;
     const toolCall = event.payload && event.payload.tool_call;
@@ -1122,7 +1318,7 @@ function renderWorkflowActual(step, events) {
   if (step === "model") {
     const start = [...events].reverse().find((event) => event.phase === "model_start" && event.payload && event.payload.message_count);
     const calls = events.filter((event) => event.phase === "tool_call");
-    const answer = [...events].reverse().find((event) => event.heading === "Model Response");
+    const answer = [...events].reverse().find((event) => event.heading === "Model response");
     const usage = [...events].reverse().find((event) => event.phase === "token_usage");
     if (start) addWorkflowActual("Context", `${start.payload.message_count} message(s) plus system instructions, room state, and tool schemas.`);
     if (calls.length) addWorkflowActual("Decision", calls.map(toolCallDescription).join("; "), "action");
@@ -1154,6 +1350,7 @@ function eventStep(event) {
   if (event.phase === "tool_call" || event.phase === "tool_result") return "tools";
   if (event.phase === "final") return "final";
   const node = event.payload && event.payload.node;
+  if (node === "final_model") return "final";
   if (node) return node;
   if (event.phase === "token_usage" || event.phase.startsWith("model")) return "model";
   return null;
@@ -1520,7 +1717,18 @@ function handleLifecycleEvent(event) {
   }
 
   if (event.phase === "model_token") {
-    appendStreamingAssistantToken(event.message);
+    const payloadTarget = event.payload && event.payload.response_target;
+    const target =
+      payloadTarget === "final" || payloadTarget === "working" || payloadTarget === "pending"
+        ? payloadTarget
+        : currentModelStreamTarget;
+    if (target === "final") {
+      appendStreamingAssistantToken(event.message);
+    } else if (target === "pending") {
+      appendPendingModelToken(event.message);
+    } else {
+      appendWorkingModelToken(event.message);
+    }
     return;
   }
 
@@ -1531,9 +1739,11 @@ function handleLifecycleEvent(event) {
   }
 
   if (event.phase === "final") {
+    const finalText = String(event.message || "");
+    clearPendingModelText();
+    clearWorkingModelDraft({ removeStep: true });
     finishRunTrace("completed");
-    finalizeAssistantMessage(event.message);
-    const finalText = streamAssistantText || String(event.message || "");
+    finalizeAssistantMessage(finalText);
     runReachedTerminal = true;
     const session = getSession(pendingSessionId || activeSessionId);
     session.history.push({ id: newId(), role: "assistant", content: finalText, time: formatTime(), trace: null });
@@ -1550,6 +1760,8 @@ function handleLifecycleEvent(event) {
     if (event.heading === "State Load Failed") {
       setTraceActivity("Room state unavailable; preparing a safe response");
     } else {
+      clearPendingModelText();
+      clearWorkingModelDraft({ removeStep: true });
       appendTraceStep({ type: "error", title: "Run error", content: event.message, success: false });
       finishRunTrace("error");
       addMessage("error", event.message);
@@ -1573,6 +1785,7 @@ async function sendPrompt(prompt, sessionId, userMessageId, historyForRequest) {
   pendingSessionId = sessionId;
   runHasToolCall = false;
   runReachedTerminal = false;
+  currentModelStreamTarget = "pending";
   resetStreamingAssistant();
   resetWorkflow();
   isSending = true;
@@ -1608,11 +1821,15 @@ async function sendPrompt(prompt, sessionId, userMessageId, historyForRequest) {
     }
   } catch (error) {
     if (error.name === "AbortError") {
+      clearPendingModelText();
+      clearWorkingModelDraft({ removeStep: true });
       finishRunTrace("stopped");
       runReachedTerminal = true;
       addLog({ phase: "stopped", heading: "Response Stopped", message: "Streaming was stopped by you.", color: "#f6c96a" });
       refreshDeviceState();
     } else {
+      clearPendingModelText();
+      clearWorkingModelDraft({ removeStep: true });
       appendTraceStep({ type: "error", title: "Connection error", content: error.message, success: false });
       finishRunTrace("error");
       addMessage("error", error.message);
@@ -1621,6 +1838,8 @@ async function sendPrompt(prompt, sessionId, userMessageId, historyForRequest) {
     pendingSessionId = null;
   } finally {
     if (!runReachedTerminal && activeTrace) {
+      clearPendingModelText();
+      clearWorkingModelDraft({ removeStep: true });
       appendTraceStep({ type: "error", title: "Incomplete response", content: "Deepsy did not produce a final answer.", success: false });
       finishRunTrace("error");
       addMessage("error", "The response ended before Deepsy produced a final answer.");
@@ -1729,7 +1948,7 @@ composer.addEventListener("submit", (event) => {
     session.title = deriveTitle(prompt);
   }
 
-  addMessage("user", prompt, formatTime(), { forceScroll: true });
+  addMessage("user", prompt, formatTime(), { forceScroll: true, smoothScroll: true });
   const userMessage = { id: newId(), role: "user", content: prompt, time: formatTime(), trace: null };
   session.history.push(userMessage);
   session.history = trimHistoryToUserLimit(session.history);
@@ -1864,6 +2083,7 @@ window.RoomApp = {
   scrollToLatest,
   updateScrollLatestButton,
   formatClockTime,
+  beginRunTrace,
   collapseRunTrace,
   expandRunTrace,
   toggleRunTrace,

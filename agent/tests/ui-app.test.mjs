@@ -77,26 +77,51 @@ test("sums grand usage across sessions", async () => {
   dom.window.close();
 });
 
-test("streams model tokens into one assistant bubble and final does not duplicate it", async () => {
+test("pending model tokens stay hidden until classified", async () => {
   const dom = await createAppDom();
   dom.window.RoomApp.resetStreamingAssistant();
+  dom.window.RoomApp.beginRunTrace("user-1");
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "model", response_target: "pending" },
+  });
   dom.window.RoomApp.handleLifecycleEvent({
     phase: "model_token",
     heading: "Model Token",
     message: "Hello",
     color: "#fff",
-    payload: { node: "model" },
+    payload: { node: "model", response_target: "pending" },
   });
   dom.window.RoomApp.handleLifecycleEvent({
     phase: "model_token",
     heading: "Model Token",
     message: " world",
     color: "#fff",
-    payload: { node: "model" },
+    payload: { node: "model", response_target: "pending" },
   });
-  const streamingBubble = dom.window.document.querySelector(".message-row.assistant .message");
-  assert.equal(streamingBubble.classList.contains("streaming"), true);
-  assert.equal(streamingBubble.classList.contains("streaming-tick"), true);
+
+  assert.equal(dom.window.document.querySelector(".trace-step.model"), null);
+  assert.equal(dom.window.document.querySelectorAll(".message-row.assistant").length, 0);
+
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_intermediate",
+    heading: "Model response",
+    message: "Hello world",
+    color: "#fff",
+    payload: { node: "model", call_index: 1, tool_call_count: 0, response_target: "working" },
+  });
+  assert.equal(dom.window.document.querySelector(".trace-step.model"), null);
+
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Final Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "final_model", response_target: "final" },
+  });
   dom.window.RoomApp.handleLifecycleEvent({
     phase: "final",
     heading: "Final Output",
@@ -104,11 +129,172 @@ test("streams model tokens into one assistant bubble and final does not duplicat
     color: "#fff",
     payload: { content: "Hello world" },
   });
+  await new Promise((resolve) => dom.window.setTimeout(resolve, 160));
 
   const assistantMessages = [...dom.window.document.querySelectorAll(".message-row.assistant .message-body")];
   assert.equal(assistantMessages.length, 1);
   assert.equal(assistantMessages[0].textContent.trim(), "Hello world");
-  assert.equal(streamingBubble.classList.contains("streaming"), false);
+  assert.equal(dom.window.document.querySelector(".trace-step.model"), null);
+  dom.window.close();
+});
+
+test("classified tool-call model response is committed before tools", async () => {
+  const dom = await createAppDom();
+  dom.window.RoomApp.resetStreamingAssistant();
+  dom.window.RoomApp.beginRunTrace("user-2");
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "model", response_target: "pending" },
+  });
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_token",
+    heading: "Model Token",
+    message: "I will ",
+    color: "#fff",
+    payload: { node: "model", response_target: "pending" },
+  });
+  assert.equal(dom.window.document.querySelector(".trace-step.model"), null);
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_intermediate",
+    heading: "Model response",
+    message: "I will turn on the fan.",
+    color: "#fff",
+    payload: { node: "model", call_index: 1, tool_call_count: 1, response_target: "working" },
+  });
+
+  assert.equal(dom.window.document.querySelector(".trace-step.model strong").textContent, "Model response");
+  const modelStep = dom.window.document.querySelector(".trace-step.model .trace-step-body");
+  assert.equal(modelStep.textContent.trim(), "I will turn on the fan.");
+  assert.equal(dom.window.document.querySelector(".trace-step.model.streaming"), null);
+  assert.equal(dom.window.document.querySelectorAll(".message-row.assistant").length, 0);
+  dom.window.close();
+});
+
+test("final-target model tokens stream in the assistant bubble and final reuses it", async () => {
+  const dom = await createAppDom();
+  dom.window.RoomApp.resetStreamingAssistant();
+  dom.window.RoomApp.beginRunTrace("user-final");
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "model", response_target: "final" },
+  });
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_token",
+    heading: "Model Token",
+    message: "Final",
+    color: "#fff",
+    payload: { node: "model" },
+  });
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_token",
+    heading: "Model Token",
+    message: " answer",
+    color: "#fff",
+    payload: { node: "model" },
+  });
+
+  const assistantBubble = dom.window.document.querySelector(".message-row.assistant .message");
+  assert.equal(assistantBubble.classList.contains("streaming"), true);
+  assert.equal(assistantBubble.querySelector(".message-body").textContent.trim(), "Final answer");
+  assert.equal(dom.window.document.querySelector(".trace-step.model"), null);
+
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "final",
+    heading: "Final Output",
+    message: "Final answer",
+    color: "#fff",
+    payload: { content: "Final answer" },
+  });
+
+  const assistantMessages = [...dom.window.document.querySelectorAll(".message-row.assistant .message-body")];
+  assert.equal(assistantMessages.length, 1);
+  assert.equal(assistantMessages[0].textContent.trim(), "Final answer");
+  assert.equal(assistantBubble.classList.contains("streaming"), false);
+  dom.window.close();
+});
+
+test("pending post-tool model tokens wait and final-model tokens stream in chat", async () => {
+  const dom = await createAppDom();
+  dom.window.RoomApp.resetStreamingAssistant();
+  dom.window.RoomApp.beginRunTrace("user-pending");
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "model", response_target: "pending" },
+  });
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_token",
+    heading: "Model Token",
+    message: "Final",
+    color: "#fff",
+    payload: { node: "model", response_target: "pending" },
+  });
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_token",
+    heading: "Model Token",
+    message: " answer",
+    color: "#fff",
+    payload: { node: "model", response_target: "pending" },
+  });
+
+  assert.equal(dom.window.document.querySelector(".message-row.assistant"), null);
+  assert.equal(dom.window.document.querySelector(".trace-step.model"), null);
+
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_intermediate",
+    heading: "Model response",
+    message: "Ready for the final reply.",
+    color: "#fff",
+    payload: { node: "model", call_index: 2, tool_call_count: 0, response_target: "working" },
+  });
+  assert.equal(dom.window.document.querySelector(".trace-step.model"), null);
+
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Final Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "final_model", response_target: "final" },
+  });
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_token",
+    heading: "Model Token",
+    message: "Final",
+    color: "#fff",
+    payload: { node: "final_model", response_target: "final" },
+  });
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_token",
+    heading: "Model Token",
+    message: " answer",
+    color: "#fff",
+    payload: { node: "final_model", response_target: "final" },
+  });
+
+  const assistantBubble = dom.window.document.querySelector(".message-row.assistant .message");
+  assert.equal(assistantBubble.classList.contains("streaming"), true);
+  assert.equal(assistantBubble.querySelector(".message-body").textContent.trim(), "Final answer");
+
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "final",
+    heading: "Final Output",
+    message: "Final answer",
+    color: "#fff",
+    payload: { content: "Final answer" },
+  });
+
+  const assistantMessages = [...dom.window.document.querySelectorAll(".message-row.assistant .message-body")];
+  assert.equal(assistantMessages.length, 1);
+  assert.equal(assistantMessages[0].textContent.trim(), "Final answer");
+  assert.equal(dom.window.document.querySelector(".trace-step.model"), null);
   dom.window.close();
 });
 
@@ -202,6 +388,14 @@ test("streaming does not force scroll when user is away from bottom", async () =
   messages.dispatchEvent(new dom.window.Event("scroll"));
 
   dom.window.RoomApp.resetStreamingAssistant();
+  dom.window.RoomApp.beginRunTrace("scroll-user-1");
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "model", response_target: "final" },
+  });
   dom.window.RoomApp.handleLifecycleEvent({
     phase: "model_token",
     heading: "Model Token",
@@ -225,8 +419,16 @@ test("streaming follows when scroll latest button is hidden", async () => {
   messages.dispatchEvent(new dom.window.Event("scroll"));
   assert.equal(dom.window.document.getElementById("scrollLatest").hidden, true);
 
+  dom.window.RoomApp.beginRunTrace("scroll-user-2");
   scrollHeight = 1400;
   dom.window.RoomApp.resetStreamingAssistant();
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "model", response_target: "final" },
+  });
   dom.window.RoomApp.handleLifecycleEvent({
     phase: "model_token",
     heading: "Model Token",
@@ -252,8 +454,16 @@ test("upward user scroll intent pauses streaming autoscroll before scroll event"
   assert.equal(button.hidden, true);
 
   messages.dispatchEvent(new dom.window.WheelEvent("wheel", { deltaY: -120 }));
+  dom.window.RoomApp.beginRunTrace("scroll-user-3");
   scrollHeight = 1400;
   dom.window.RoomApp.resetStreamingAssistant();
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "model", response_target: "final" },
+  });
   dom.window.RoomApp.handleLifecycleEvent({
     phase: "model_token",
     heading: "Model Token",
@@ -278,6 +488,14 @@ test("streaming resumes autoscroll after user returns to bottom", async () => {
   messages.dispatchEvent(new dom.window.Event("scroll"));
 
   dom.window.RoomApp.resetStreamingAssistant();
+  dom.window.RoomApp.beginRunTrace("scroll-user-4");
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "model_start",
+    heading: "Model Call",
+    message: "calling",
+    color: "#fff",
+    payload: { node: "model", response_target: "final" },
+  });
   dom.window.RoomApp.handleLifecycleEvent({
     phase: "model_token",
     heading: "Model Token",
@@ -303,6 +521,28 @@ test("streaming resumes autoscroll after user returns to bottom", async () => {
 
   assert.equal(messages.scrollTop, 1400);
   assert.equal(button.hidden, true);
+  dom.window.close();
+});
+
+test("submitting a new message scrolls to bottom smoothly", async () => {
+  const dom = await createAppDom();
+  const messages = dom.window.document.getElementById("messages");
+  const composer = dom.window.document.getElementById("composer");
+  const prompt = dom.window.document.getElementById("prompt");
+  const scrollCalls = [];
+  dom.window.fetch = () => new Promise(() => {});
+  Object.defineProperty(messages, "scrollHeight", { configurable: true, value: 1200 });
+  Object.defineProperty(messages, "clientHeight", { configurable: true, value: 400 });
+  messages.scrollTop = 120;
+  messages.scrollTo = (options) => scrollCalls.push(options);
+  messages.dispatchEvent(new dom.window.Event("scroll"));
+
+  prompt.value = "smooth scroll please";
+  composer.dispatchEvent(new dom.window.Event("submit", { bubbles: true, cancelable: true }));
+
+  assert.equal(scrollCalls.length, 1);
+  assert.equal(scrollCalls[0].top, 1200);
+  assert.equal(scrollCalls[0].behavior, "smooth");
   dom.window.close();
 });
 

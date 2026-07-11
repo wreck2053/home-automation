@@ -804,12 +804,30 @@ h2 {
 
 @keyframes stream-caret {
   0%, 100% {
-    opacity: 0.28;
-    transform: translateY(1px);
+    transform: translateY(1px) scaleY(0.72);
   }
   50% {
-    opacity: 0.95;
+    transform: translateY(0) scaleY(1);
+  }
+}
+
+@keyframes model-draft-enter {
+  0% {
+    transform: translateY(5px);
+  }
+  100% {
     transform: translateY(0);
+  }
+}
+
+@keyframes model-draft-token {
+  0% {
+    border-color: rgba(188, 140, 255, 0.64);
+    box-shadow: 0 0 0 0 rgba(188, 140, 255, 0.14);
+  }
+  100% {
+    border-color: rgba(188, 140, 255, 0.34);
+    box-shadow: 0 0 0 8px rgba(188, 140, 255, 0);
   }
 }
 
@@ -881,6 +899,42 @@ h2 {
 
 .trace-step-body p {
   margin: 0;
+}
+
+.trace-step.model {
+  animation: model-draft-enter 180ms ease-out;
+}
+
+.trace-step.model .trace-step-body {
+  width: fit-content;
+  max-width: min(100%, 680px);
+  padding: 9px 11px;
+  border: 1px solid rgba(188, 140, 255, 0.34);
+  border-radius: 11px;
+  background: rgba(188, 140, 255, 0.075);
+  color: #e9edf3;
+  transition: border-color 180ms ease, box-shadow 180ms ease, transform 180ms ease;
+}
+
+.trace-step.model.streaming .trace-step-status {
+  color: var(--muted-2);
+  text-transform: uppercase;
+}
+
+.trace-step.model.streaming .trace-step-body::after {
+  content: "";
+  width: 6px;
+  height: 1em;
+  margin-left: 3px;
+  display: inline-block;
+  vertical-align: -0.15em;
+  border-radius: 999px;
+  background: rgba(188, 140, 255, 0.74);
+  animation: stream-caret 900ms ease-in-out infinite;
+}
+
+.trace-step.model .trace-step-body.streaming-tick {
+  animation: model-draft-token 180ms ease-out;
 }
 
 .trace-step-body code {

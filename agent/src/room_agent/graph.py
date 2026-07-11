@@ -62,7 +62,7 @@ class RoomAssistant:
         self.graph = self._build_graph()
         self.workflow_summary = (
             "START -> load_state -> model -> tools? -> "
-            "load_state_after_tools -> model/final"
+            "load_state_after_tools -> model -> final_model"
         )
         self.workflow_mermaid = self.graph.get_graph(xray=True).draw_mermaid()
 
@@ -133,7 +133,8 @@ class RoomAssistant:
                     for update_event, maybe_final in update_events:
                         if maybe_final:
                             final_message = maybe_final
-                        yield update_event
+                        if update_event is not None:
+                            yield update_event
         except Exception as exc:
             yield event(
                 run_id=run_id,
@@ -159,13 +160,15 @@ class RoomAssistant:
         builder = StateGraph(RoomAgentState)
         builder.add_node("load_state", self._load_state)
         builder.add_node("model", self._call_model)
+        builder.add_node("final_model", self._call_final_model)
         builder.add_node("tools", ToolNode(self.tools))
         builder.add_node("load_state_after_tools", self._load_state_after_tools)
         builder.add_edge(START, "load_state")
         builder.add_edge("load_state", "model")
-        builder.add_conditional_edges("model", self._should_continue, ["tools", END])
+        builder.add_conditional_edges("model", self._should_continue, ["tools", "final_model"])
         builder.add_edge("tools", "load_state_after_tools")
         builder.add_edge("load_state_after_tools", "model")
+        builder.add_edge("final_model", END)
         return builder.compile()
 
     def _messages_from_history(
@@ -219,12 +222,13 @@ class RoomAssistant:
             return {"device_state": None, "device_error": str(exc)}
 
     async def _call_model(self, state: RoomAgentState) -> dict[str, list[BaseMessage]]:
+        response_target = "pending"
         self._write(
             state,
             EventPhase.phase_start,
             "Model Node",
             "Entering `model`",
-            {"node": "model"},
+            {"node": "model", "response_target": response_target},
         )
         self._write(
             state,
@@ -235,18 +239,50 @@ class RoomAssistant:
                 "node": "model",
                 "message_count": len(state["messages"]),
                 "device_state": state.get("device_state"),
+                "response_target": response_target,
             },
         )
         response = await self.model_with_tools.ainvoke(
-            [SystemMessage(content=self._system_message(state)), *state["messages"]]
+            [SystemMessage(content=self._planner_system_message(state)), *state["messages"]]
         )
         return {"messages": [response]}
 
-    def _should_continue(self, state: RoomAgentState) -> Literal["tools", "__end__"]:
+    async def _call_final_model(self, state: RoomAgentState) -> dict[str, list[BaseMessage]]:
+        self._write(
+            state,
+            EventPhase.phase_start,
+            "Final Model Node",
+            "Entering `final_model`",
+            {"node": "final_model", "response_target": "final"},
+        )
+        self._write(
+            state,
+            EventPhase.model_start,
+            "Final Model Call",
+            "Calling DeepSeek for final chat response",
+            {
+                "node": "final_model",
+                "message_count": len(state["messages"]),
+                "device_state": state.get("device_state"),
+                "response_target": "final",
+            },
+        )
+        response = await self.model.ainvoke(
+            [SystemMessage(content=self._system_message(state)), *self._final_messages(state)]
+        )
+        return {"messages": [response]}
+
+    def _final_messages(self, state: RoomAgentState) -> list[BaseMessage]:
+        messages = list(state["messages"])
+        if messages and isinstance(messages[-1], AIMessage) and not messages[-1].tool_calls:
+            messages.pop()
+        return messages
+
+    def _should_continue(self, state: RoomAgentState) -> Literal["tools", "final_model"]:
         last_message = state["messages"][-1]
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
             return "tools"
-        return END
+        return "final_model"
 
     def _system_message(self, state: RoomAgentState) -> str:
         device_state = state.get("device_state")
@@ -254,6 +290,18 @@ class RoomAssistant:
         if device_state is None:
             state_json = f"Unavailable: {state.get('device_error') or 'unknown error'}"
         return f"{SYSTEM_PROMPT}\n\nCurrent room state:\n{state_json}"
+
+    def _planner_system_message(self, state: RoomAgentState) -> str:
+        return (
+            f"{self._system_message(state)}\n\n"
+            "Internal planning step:\n"
+            "- Decide whether room-control tools are needed.\n"
+            "- If tools are needed, call them. Any text before tool calls must be a brief status note.\n"
+            "- If no tool is needed, or no more tools are needed, return no text content.\n"
+            "- Do not write the final chat answer in this step; a separate final model call will do that.\n"
+            "- No tables, headings, long recaps, or markdown sections here.\n"
+            "- Keep any text content under 120 characters."
+        )
 
     def _write(
         self,
@@ -279,7 +327,8 @@ class RoomAssistant:
         self, chunk: dict[str, Any], run_id: str, turn_id: str
     ) -> LifecycleEvent | None:
         message_chunk, metadata = chunk["data"]
-        if metadata.get("langgraph_node") != "model":
+        node = metadata.get("langgraph_node")
+        if node not in {"model", "final_model"}:
             return None
         content = self._message_text(message_chunk)
         if not content:
@@ -290,7 +339,10 @@ class RoomAssistant:
             phase=EventPhase.model_token,
             heading="Model Token",
             message=content,
-            payload={"node": "model"},
+            payload={
+                "node": node,
+                "response_target": "final" if node == "final_model" else "pending",
+            },
         )
 
     def _events_from_update(
@@ -299,8 +351,8 @@ class RoomAssistant:
         run_id: str,
         turn_id: str,
         model_call_count: int,
-    ) -> tuple[list[tuple[LifecycleEvent, str | None]], int]:
-        events: list[tuple[LifecycleEvent, str | None]] = []
+    ) -> tuple[list[tuple[LifecycleEvent | None, str | None]], int]:
+        events: list[tuple[LifecycleEvent | None, str | None]] = []
         for node_name, update in update_data.items():
             if not isinstance(update, dict):
                 continue
@@ -315,12 +367,13 @@ class RoomAssistant:
                                     run_id=run_id,
                                     turn_id=turn_id,
                                     phase=EventPhase.model_intermediate,
-                                    heading="Intermediate Model Output",
+                                    heading="Model response",
                                     message=content,
                                     payload={
                                         "node": node_name,
                                         "call_index": model_call_count,
                                         "tool_call_count": len(message.tool_calls),
+                                        "response_target": "working",
                                     },
                                 ),
                                 None,
@@ -371,19 +424,8 @@ class RoomAssistant:
                     model_call_count += 1
                     content = self._message_text(message)
                     if content:
-                        events.append(
-                            (
-                                event(
-                                    run_id=run_id,
-                                    turn_id=turn_id,
-                                    phase=EventPhase.model_start,
-                                    heading="Model Response",
-                                    message=content,
-                                    payload={"node": node_name},
-                                ),
-                                content,
-                            )
-                        )
+                        if node_name == "final_model":
+                            events.append((None, content))
                     events.append(
                         self._token_usage_event(
                             message, run_id, turn_id, node_name, model_call_count
