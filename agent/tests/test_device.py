@@ -96,3 +96,32 @@ async def test_tool_returns_friendly_timeout_error() -> None:
     parsed = json.loads(response)
     assert parsed["success"] is False
     assert "timed out" in parsed["message"]
+
+
+@pytest.mark.asyncio
+async def test_disabling_turbo_and_other_features_do_not_interrupt(
+    mutable_device_transport,
+) -> None:
+    state = state_payload(ac_power=True, turbo=True, swing=False)
+    async with httpx.AsyncClient(
+        transport=mutable_device_transport(state), base_url="http://device"
+    ) as http_client:
+        client = RoomDeviceClient(
+            base_url="http://device", timeout_seconds=1, http_client=http_client
+        )
+        tools = {tool.name: tool for tool in create_room_tools(client)}
+        turbo_result = json.loads(
+            await tools["set_ac_feature"].ainvoke(
+                {"feature": "turbo", "enabled": False}
+            )
+        )
+        swing_result = json.loads(
+            await tools["set_ac_feature"].ainvoke(
+                {"feature": "swing", "enabled": True}
+            )
+        )
+
+    assert turbo_result["success"] is True
+    assert swing_result["success"] is True
+    assert state["ac"]["turbo"] is False
+    assert state["ac"]["swing"] is True

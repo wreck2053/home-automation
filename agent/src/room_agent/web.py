@@ -1,25 +1,35 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from pathlib import Path
 from typing import Protocol
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from .config import Settings, load_settings
 from .device import RoomDeviceClient
-from .events import event, new_run_id
+from .events import event, new_run_id, redact_payload
 from .graph import RoomAssistant
-from .schemas import ChatRequest, EventPhase, LifecycleEvent
+from .schemas import ChatRequest, EventPhase, LifecycleEvent, ResumeRequest
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 class AssistantLike(Protocol):
-    async def run(self, prompt: str, history=None):  # type: ignore[no-untyped-def]
+    async def run(  # type: ignore[no-untyped-def]
+        self, prompt: str, history=None, *, thread_id: str | None = None
+    ):
+        ...
+
+    async def resume(self, thread_id: str, approved: bool):
+        ...
+
+    async def thread_status(self, thread_id: str) -> dict:
         ...
 
     async def aclose(self) -> None:
@@ -27,6 +37,7 @@ class AssistantLike(Protocol):
 
 
 AssistantFactory = Callable[[Settings], AssistantLike]
+SaverContext = AbstractAsyncContextManager[AsyncSqliteSaver]
 
 
 def encode_sse(lifecycle_event: LifecycleEvent) -> str:
@@ -44,35 +55,85 @@ def create_app(assistant_factory: AssistantFactory | None = None) -> FastAPI:
     @app.post("/api/chat")
     async def chat(request: ChatRequest) -> StreamingResponse:
         settings = load_settings()
+        if not settings.has_deepseek_api_key:
+            raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY is required")
+        assistant, saver_context = await _open_assistant(settings, assistant_factory)
+        if hasattr(assistant, "thread_status"):
+            try:
+                status = await assistant.thread_status(request.thread_id)
+            except Exception:
+                await _close_assistant(assistant, saver_context)
+                raise
+            if status.get("status") == "interrupted":
+                await _close_assistant(assistant, saver_context)
+                raise HTTPException(
+                    status_code=409,
+                    detail="Resolve the pending turbo approval before sending another prompt.",
+                )
 
         async def stream():
-            if not settings.has_deepseek_api_key:
-                run_id = new_run_id()
-                yield encode_sse(
-                    event(
-                        run_id=run_id,
-                        turn_id=run_id[:10],
-                        phase=EventPhase.error,
-                        heading="Missing API Key",
-                        message="DEEPSEEK_API_KEY is required for chat requests.",
-                    )
-                )
-                return
-
-            assistant = (
-                assistant_factory(settings)
-                if assistant_factory is not None
-                else RoomAssistant.from_settings(settings)
-            )
             try:
                 async for lifecycle_event in assistant.run(
-                    request.prompt, history=request.history
+                    request.prompt, history=request.history, thread_id=request.thread_id
                 ):
                     yield encode_sse(lifecycle_event)
             finally:
-                await assistant.aclose()
+                await _close_assistant(assistant, saver_context)
 
         return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.post("/api/chat/resume")
+    async def resume_chat(request: ResumeRequest) -> StreamingResponse:
+        settings = load_settings()
+        if not settings.has_deepseek_api_key:
+            raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY is required")
+        assistant, saver_context = await _open_assistant(settings, assistant_factory)
+        if not hasattr(assistant, "resume") or not hasattr(assistant, "thread_status"):
+            await _close_assistant(assistant, saver_context)
+            raise HTTPException(status_code=501, detail="Assistant does not support resume")
+        try:
+            status = await assistant.thread_status(request.thread_id)
+        except Exception:
+            await _close_assistant(assistant, saver_context)
+            raise
+        if status.get("status") != "interrupted":
+            await _close_assistant(assistant, saver_context)
+            raise HTTPException(status_code=409, detail="Thread has no pending approval")
+
+        async def stream():
+            try:
+                async for lifecycle_event in assistant.resume(
+                    request.thread_id, request.approved
+                ):
+                    yield encode_sse(lifecycle_event)
+            finally:
+                await _close_assistant(assistant, saver_context)
+
+        return StreamingResponse(stream(), media_type="text/event-stream")
+
+    @app.get("/api/threads/{thread_id}")
+    async def thread_status(thread_id: str) -> dict:
+        settings = load_settings()
+        if not settings.has_deepseek_api_key:
+            raise HTTPException(status_code=503, detail="DEEPSEEK_API_KEY is required")
+        assistant, saver_context = await _open_assistant(settings, assistant_factory)
+        try:
+            if not hasattr(assistant, "thread_status"):
+                raise HTTPException(status_code=501, detail="Assistant does not support checkpoints")
+            return redact_payload(await assistant.thread_status(thread_id))
+        finally:
+            await _close_assistant(assistant, saver_context)
+
+    @app.delete("/api/threads/{thread_id}", status_code=204)
+    async def delete_thread(thread_id: str) -> Response:
+        settings = load_settings()
+        settings.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+        async with AsyncSqliteSaver.from_conn_string(
+            str(settings.checkpoint_db_path)
+        ) as saver:
+            await saver.setup()
+            await saver.adelete_thread(thread_id)
+        return Response(status_code=204)
 
     @app.get("/api/device-state")
     async def device_state() -> dict:
@@ -110,6 +171,32 @@ def create_app(assistant_factory: AssistantFactory | None = None) -> FastAPI:
         }
 
     return app
+
+
+async def _open_assistant(
+    settings: Settings, assistant_factory: AssistantFactory | None
+) -> tuple[AssistantLike, SaverContext | None]:
+    if assistant_factory is not None:
+        return assistant_factory(settings), None
+    settings.checkpoint_db_path.parent.mkdir(parents=True, exist_ok=True)
+    saver_context = AsyncSqliteSaver.from_conn_string(str(settings.checkpoint_db_path))
+    saver = await saver_context.__aenter__()
+    try:
+        assistant = RoomAssistant.from_settings(settings, checkpointer=saver)
+    except Exception as exc:
+        await saver_context.__aexit__(type(exc), exc, exc.__traceback__)
+        raise
+    return assistant, saver_context
+
+
+async def _close_assistant(
+    assistant: AssistantLike, saver_context: SaverContext | None
+) -> None:
+    try:
+        await assistant.aclose()
+    finally:
+        if saver_context is not None:
+            await saver_context.__aexit__(None, None, None)
 
 
 app = create_app()

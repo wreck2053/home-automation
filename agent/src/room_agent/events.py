@@ -15,6 +15,9 @@ TERMINAL_COLORS: dict[EventPhase, str] = {
     EventPhase.token_usage: "bright_white",
     EventPhase.tool_call: "orange1",
     EventPhase.tool_result: "deep_sky_blue1",
+    EventPhase.checkpoint: "bright_blue",
+    EventPhase.approval_required: "bright_yellow",
+    EventPhase.approval_decision: "bright_magenta",
     EventPhase.final: "spring_green1",
     EventPhase.error: "bright_red",
 }
@@ -28,6 +31,9 @@ UI_COLORS: dict[EventPhase, str] = {
     EventPhase.token_usage: "#d7e1f2",
     EventPhase.tool_call: "#ff9f43",
     EventPhase.tool_result: "#5ad7ff",
+    EventPhase.checkpoint: "#59a7ff",
+    EventPhase.approval_required: "#ffd166",
+    EventPhase.approval_decision: "#bc8cff",
     EventPhase.final: "#24f28c",
     EventPhase.error: "#ff5d6c",
 }

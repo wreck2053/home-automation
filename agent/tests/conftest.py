@@ -78,6 +78,9 @@ def mutable_device_transport() -> Callable[[dict[str, Any]], httpx.MockTransport
                 feature = path.rsplit("/", 1)[1]
                 state["ac"][feature] = not state["ac"][feature]
                 return httpx.Response(200, text="Feature")
+            if path in {"/state/turbo/on", "/state/turbo/off"}:
+                state["ac"]["turbo"] = path.endswith("/on")
+                return httpx.Response(200, text="Turbo")
             return httpx.Response(404, text=json.dumps({"error": path}))
 
         return httpx.MockTransport(handler)

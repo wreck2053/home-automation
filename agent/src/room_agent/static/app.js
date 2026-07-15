@@ -6,13 +6,27 @@ const promptPreviewEl = document.getElementById("promptPreview");
 const writeTabEl = document.getElementById("writeTab");
 const previewTabEl = document.getElementById("previewTab");
 const composerExpandEl = document.getElementById("composerExpand");
+const voiceLauncherEl = document.getElementById("voiceLauncher");
+const voiceModalEl = document.getElementById("voiceModal");
+const voiceCloseEl = document.getElementById("voiceClose");
+const voiceStripEl = document.getElementById("voiceStrip");
+const voiceToggleEl = document.getElementById("voiceToggle");
+const voiceToggleTextEl = document.getElementById("voiceToggleText");
+const voiceClearEl = document.getElementById("voiceClear");
+const voiceStatusEl = document.getElementById("voiceStatus");
+const voiceStatusDetailEl = document.getElementById("voiceStatusDetail");
+const voiceHeardEl = document.getElementById("voiceHeard");
+const voiceAlternativesEl = document.getElementById("voiceAlternatives");
+const voiceTranscriptEl = document.getElementById("voiceTranscript");
+const voiceEngineStatusEl = document.getElementById("voiceEngineStatus");
+const voiceRestartCountEl = document.getElementById("voiceRestartCount");
+const voiceActivityEl = document.getElementById("voiceActivity");
 const sendButton = document.getElementById("send");
 const sendTextEl = document.getElementById("sendText");
 const sendIconEl = document.getElementById("sendIcon");
 const stopButton = document.getElementById("stopResponse");
 const scrollLatestButton = document.getElementById("scrollLatest");
 const healthEl = document.getElementById("health");
-const railEl = document.getElementById("workflowRail");
 const modelNameEl = document.getElementById("modelName");
 const sessionTokensEl = document.getElementById("sessionTokens");
 const sessionCostEl = document.getElementById("sessionCost");
@@ -30,11 +44,6 @@ const usageTotalTokensEl = document.getElementById("usageTotalTokens");
 const usageTotalCostEl = document.getElementById("usageTotalCost");
 const modelCallsEl = document.getElementById("modelCalls");
 const tokenCallsEl = document.getElementById("tokenCalls");
-const workflowDetailKickerEl = document.getElementById("workflowDetailKicker");
-const workflowDetailTitleEl = document.getElementById("workflowDetailTitle");
-const workflowDetailMessageEl = document.getElementById("workflowDetailMessage");
-const workflowDetailActualEl = document.getElementById("workflowDetailActual");
-const workflowTooltipEl = document.getElementById("workflowTooltip");
 const usagePanel = document.getElementById("usagePanel");
 const workflowPanel = document.getElementById("workflowPanel");
 const usageTab = document.getElementById("usageTab");
@@ -53,31 +62,7 @@ const STORAGE_KEYS = {
   legacyUsageCalls: "roomAssistant.usageCalls.v1",
 };
 
-const WORKFLOW_ORDER = ["load_state", "model", "tools", "load_state_after_tools", "final"];
 const MAX_MODEL_DRAFT_CHARS = 220;
-
-const WORKFLOW_DETAILS = {
-  load_state: {
-    title: "Load state",
-    message: "This reads the live ESP32 state before Deepsy decides what to do.",
-  },
-  model: {
-    title: "Model",
-    message: "This is the model decision point: reply normally or request a room-control tool.",
-  },
-  tools: {
-    title: "Tools",
-    message: "This runs only when the model requested a known room-control tool.",
-  },
-  load_state_after_tools: {
-    title: "Refresh state",
-    message: "After an action, this verifies the device state before the final answer is written.",
-  },
-  final: {
-    title: "Final reply",
-    message: "This is the answer returned to chat after the graph has finished.",
-  },
-};
 
 const MODEL_PRICING = {
   "deepseek-v4-flash": { label: "DeepSeek V4 Flash", cacheHit: 0.0028, cacheMiss: 0.14, output: 0.28 },
@@ -110,10 +95,6 @@ let userScrollAwayIntent = false;
 let lastTouchY = null;
 let sessions = loadSessions();
 let activeSessionId = loadActiveSessionId();
-let selectedWorkflowStep = "load_state";
-let visibleWorkflowTooltipStep = null;
-let workflowTooltipHideTimer = null;
-let workflowEvents = {};
 let composerExpanded = false;
 const TRACE_TOGGLE_ANIMATION_MS = 240;
 const runTraceAnimationTimers = new WeakMap();
@@ -204,6 +185,7 @@ function createSession(title = "New chat") {
     createdAt: now,
     updatedAt: now,
     history: [],
+    pendingApproval: null,
     model: "",
     usageTotals: emptyUsageTotals(),
     usageCalls: [],
@@ -395,6 +377,18 @@ function normalizeSession(raw) {
           .filter((item) => item.content)
       )
     : [];
+  if (session.pendingApproval && typeof session.pendingApproval === "object") {
+    const status = ["pending", "resuming", "approved", "denied"].includes(session.pendingApproval.status)
+      ? session.pendingApproval.status
+      : "pending";
+    normalized.pendingApproval = {
+      status,
+      userMessageId: String(session.pendingApproval.userMessageId || ""),
+      payload: session.pendingApproval.payload && typeof session.pendingApproval.payload === "object"
+        ? sanitizeTraceValue(session.pendingApproval.payload)
+        : {},
+    };
+  }
   normalized.usageCalls = Array.isArray(session.usageCalls)
     ? session.usageCalls.map(normalizeCall).slice(0, 80)
     : [];
@@ -556,7 +550,7 @@ function addMessage(role, text, timestamp = formatTime(), options = {}) {
   const meta = document.createElement("div");
   meta.className = "message-meta";
   const label = document.createElement("span");
-  label.textContent = role === "user" ? "You" : role === "error" ? "Error" : "Deepsy";
+  label.textContent = role === "user" ? "You" : role === "error" ? "Error" : "Deepy";
   const time = document.createElement("time");
   time.textContent = timestamp;
   meta.append(label, time);
@@ -1066,7 +1060,7 @@ function finishRunTrace(status) {
   if (status === "completed" && activeTrace.steps.length === 0) {
     appendTraceStep({ type: "direct", title: "Direct response", content: "Answered without calling room tools." });
   }
-  failPendingToolCalls(activeTrace.steps, status);
+  if (status !== "interrupted") failPendingToolCalls(activeTrace.steps, status);
   activeTrace.status = status;
   activeTrace.durationMs = Date.now() - activeTrace.startedAt;
   activeTrace.lastUpdatedAt = Date.now();
@@ -1121,7 +1115,7 @@ function updateTraceFromLifecycle(event) {
       clearWorkingModelDraft({ removeStep: true });
       setTraceActivity("Preparing the final response");
     } else {
-      setTraceActivity("Deepsy is reasoning");
+      setTraceActivity("Deepy is reasoning");
     }
   } else if (event.phase === "model_intermediate") {
     const toolCallCount = Number(event.payload && event.payload.tool_call_count) || 0;
@@ -1176,184 +1170,59 @@ function updateTraceFromLifecycle(event) {
 
 function renderPersistedChat() {
   const session = getSession();
+  let approvalRendered = false;
   messagesEl.replaceChildren();
   session.history.forEach((item) => {
     addMessage(item.role, item.content, item.time || "");
-    if (item.role === "user" && item.trace) renderRunTrace(item.trace, false);
+    if (item.role === "user" && item.trace) {
+      const view = renderRunTrace(item.trace, Boolean(activeTrace && activeTrace.id === item.trace.id));
+      if (activeTrace && activeTrace.id === item.trace.id) activeTraceView = view;
+    }
+    if (
+      item.role === "user" &&
+      session.pendingApproval &&
+      session.pendingApproval.userMessageId === item.id
+    ) {
+      renderApprovalCard(session);
+      approvalRendered = true;
+    }
   });
+  if (!approvalRendered) renderApprovalCard(session);
   scrollToLatest({ force: true });
 }
 
-function resetWorkflow() {
-  workflowEvents = {};
-  hideWorkflowTooltipNow();
-  railEl.querySelectorAll("[data-step]").forEach((item) => {
-    item.classList.remove("active", "completed");
-  });
-  renderWorkflowDetail();
-}
-
-function setActiveStep(step) {
-  const activeIndex = WORKFLOW_ORDER.indexOf(step);
-  railEl.querySelectorAll("[data-step]").forEach((item) => {
-    const itemIndex = WORKFLOW_ORDER.indexOf(item.dataset.step);
-    item.classList.toggle("active", item.dataset.step === step);
-    item.classList.toggle("completed", activeIndex > itemIndex && itemIndex >= 0);
-  });
-}
-
-function renderWorkflowDetail(step = selectedWorkflowStep) {
-  const detail = WORKFLOW_DETAILS[step] || WORKFLOW_DETAILS.load_state;
-  const events = workflowEvents[step] || [];
-  workflowDetailKickerEl.textContent = events.length ? `${events.length} event${events.length === 1 ? "" : "s"} in this run` : "Awaiting a run";
-  workflowDetailTitleEl.textContent = detail.title;
-  workflowDetailMessageEl.textContent = detail.message;
-  renderWorkflowActual(step, events);
-
-  railEl.querySelectorAll("[data-step]").forEach((item) => {
-    const isSelected = item.dataset.step === step;
-    item.classList.toggle("selected", isSelected);
-    item.setAttribute("aria-pressed", String(isSelected));
-  });
-}
-
-function mountWorkflowTooltip() {
-  if (workflowTooltipEl && workflowTooltipEl.parentElement !== document.body) {
-    document.body.appendChild(workflowTooltipEl);
+function renderApprovalCard(session) {
+  const approval = session && session.pendingApproval;
+  if (!approval) return;
+  const card = document.createElement("article");
+  card.className = `approval-card ${approval.status}`;
+  card.dataset.approval = "turbo";
+  const title = document.createElement("strong");
+  title.textContent = "AC turbo approval";
+  const message = document.createElement("p");
+  message.textContent = approval.status === "pending"
+    ? "The graph is checkpointed and paused before activating turbo mode."
+    : approval.status === "resuming"
+      ? "Resuming the saved graph checkpoint…"
+      : `Turbo activation ${approval.status}.`;
+  card.append(title, message);
+  if (approval.status === "pending") {
+    const actions = document.createElement("div");
+    actions.className = "approval-actions";
+    const approve = document.createElement("button");
+    approve.type = "button";
+    approve.className = "approve-button";
+    approve.textContent = "Approve turbo";
+    const deny = document.createElement("button");
+    deny.type = "button";
+    deny.className = "deny-button";
+    deny.textContent = "Deny";
+    approve.addEventListener("click", () => resumeApproval(session, true));
+    deny.addEventListener("click", () => resumeApproval(session, false));
+    actions.append(approve, deny);
+    card.appendChild(actions);
   }
-}
-
-function positionWorkflowTooltip(target) {
-  if (!workflowTooltipEl || !target) return;
-  const targetRect = target.getBoundingClientRect();
-  const tooltipWidth = Math.min(560, window.innerWidth - 32);
-  const targetCenter = targetRect.left + targetRect.width / 2;
-  const left = Math.min(Math.max(targetCenter, 16 + tooltipWidth / 2), window.innerWidth - 16 - tooltipWidth / 2);
-  const belowTop = targetRect.bottom + 12;
-  const estimatedHeight = Math.min(420, window.innerHeight - 32);
-  const top = belowTop + estimatedHeight > window.innerHeight - 16
-    ? Math.max(16, targetRect.top - estimatedHeight - 12)
-    : belowTop;
-  workflowTooltipEl.style.setProperty("--tooltip-left", `${left}px`);
-  workflowTooltipEl.style.setProperty("--tooltip-top", `${top}px`);
-}
-
-function showWorkflowTooltip(step, target) {
-  if (workflowTooltipHideTimer) window.clearTimeout(workflowTooltipHideTimer);
-  workflowTooltipHideTimer = null;
-  mountWorkflowTooltip();
-  visibleWorkflowTooltipStep = step;
-  renderWorkflowDetail(step);
-  positionWorkflowTooltip(target);
-  workflowTooltipEl.hidden = false;
-}
-
-function hideWorkflowTooltip({ delay = 0 } = {}) {
-  if (workflowTooltipHideTimer) window.clearTimeout(workflowTooltipHideTimer);
-  workflowTooltipHideTimer = window.setTimeout(() => {
-    visibleWorkflowTooltipStep = null;
-    if (workflowTooltipEl) workflowTooltipEl.hidden = true;
-    workflowTooltipHideTimer = null;
-  }, delay);
-}
-
-function keepWorkflowTooltipOpen() {
-  if (workflowTooltipHideTimer) window.clearTimeout(workflowTooltipHideTimer);
-  workflowTooltipHideTimer = null;
-}
-
-function hideWorkflowTooltipNow() {
-  if (workflowTooltipHideTimer) window.clearTimeout(workflowTooltipHideTimer);
-  workflowTooltipHideTimer = null;
-  visibleWorkflowTooltipStep = null;
-  if (workflowTooltipEl) workflowTooltipEl.hidden = true;
-}
-
-function recordWorkflowEvent(event, step) {
-  workflowEvents[step] = workflowEvents[step] || [];
-  workflowEvents[step].push(event);
-  if (visibleWorkflowTooltipStep === step) renderWorkflowDetail(step);
-}
-
-function addWorkflowActual(label, value, tone = "") {
-  const row = document.createElement("div");
-  row.className = `workflow-actual-row ${tone}`.trim();
-  const key = document.createElement("span");
-  key.textContent = label;
-  const content = document.createElement("strong");
-  content.textContent = value;
-  row.append(key, content);
-  workflowDetailActualEl.appendChild(row);
-}
-
-function describeRoomState(state) {
-  if (!state || typeof state !== "object") return "State was unavailable.";
-  const ac = state.ac || {};
-  const acText = ac.power ? `on, ${ac.temperature || "?"} C, fan level ${ac.fan_level || ac.fanLevel || "?"}` : "off";
-  return `Light ${state.light ? "on" : "off"}; fan ${state.fan ? "on" : "off"}; AC ${acText}.`;
-}
-
-function toolCallDescription(event) {
-  const toolCall = event.payload && event.payload.tool_call;
-  if (!toolCall) return event.message || "Tool request recorded.";
-  const args = toolCall.args && Object.keys(toolCall.args).length ? ` with ${JSON.stringify(toolCall.args)}` : "";
-  return `${toolCall.name || "tool"}${args}`;
-}
-
-function renderWorkflowActual(step, events) {
-  workflowDetailActualEl.replaceChildren();
-  if (!events.length) {
-    addWorkflowActual("What happened", "No event for this step in the current run yet.");
-    return;
-  }
-
-  const latest = events[events.length - 1];
-  if (step === "load_state" || step === "load_state_after_tools") {
-    const snapshot = [...events].reverse().find((event) => event.phase === "state_snapshot");
-    addWorkflowActual("Result", snapshot ? describeRoomState(snapshot.payload && snapshot.payload.state) : latest.message);
-    addWorkflowActual("Learning", step === "load_state" ? "This snapshot becomes context for the first model decision." : "This verifies the action before Deepsy writes the final response.");
-    return;
-  }
-
-  if (step === "model") {
-    const start = [...events].reverse().find((event) => event.phase === "model_start" && event.payload && event.payload.message_count);
-    const calls = events.filter((event) => event.phase === "tool_call");
-    const answer = [...events].reverse().find((event) => event.heading === "Model response");
-    const usage = [...events].reverse().find((event) => event.phase === "token_usage");
-    if (start) addWorkflowActual("Context", `${start.payload.message_count} message(s) plus system instructions, room state, and tool schemas.`);
-    if (calls.length) addWorkflowActual("Decision", calls.map(toolCallDescription).join("; "), "action");
-    else if (answer) addWorkflowActual("Decision", "Answered directly; no device tool was requested.", "success");
-    if (answer) addWorkflowActual("Model output", answer.message);
-    if (usage && usage.payload) addWorkflowActual("Tokens", `Call #${usage.payload.call_index}: ${usage.payload.cache_hit_input_tokens || 0} cached, ${usage.payload.cache_miss_input_tokens || 0} new input, ${usage.payload.output_tokens || 0} output.`);
-    return;
-  }
-
-  if (step === "tools") {
-    const calls = events.filter((event) => event.phase === "tool_call");
-    const results = events.filter((event) => event.phase === "tool_result");
-    calls.forEach((event) => addWorkflowActual("Requested", toolCallDescription(event), "action"));
-    results.forEach((event) => addWorkflowActual("Result", event.message, event.message.startsWith("OK:") ? "success" : "error"));
-    if (!calls.length && !results.length) addWorkflowActual("What happened", latest.message);
-    return;
-  }
-
-  if (step === "final") {
-    addWorkflowActual("Sent to chat", latest.message || "Final response completed.", "success");
-    addWorkflowActual("Learning", "This is the completed graph output, not an additional device action.");
-    return;
-  }
-
-  addWorkflowActual("Latest event", latest.message || latest.phase);
-}
-
-function eventStep(event) {
-  if (event.phase === "tool_call" || event.phase === "tool_result") return "tools";
-  if (event.phase === "final") return "final";
-  const node = event.payload && event.payload.node;
-  if (node === "final_model") return "final";
-  if (node) return node;
-  if (event.phase === "token_usage" || event.phase.startsWith("model")) return "model";
-  return null;
+  messagesEl.appendChild(card);
 }
 
 function addLog(event) {
@@ -1428,16 +1297,21 @@ function canSendInSession(session) {
 function updateComposerState() {
   const session = getSession();
   const blockedByLimit = !canSendInSession(session);
+  const blockedByApproval = Boolean(
+    session.pendingApproval && ["pending", "resuming"].includes(session.pendingApproval.status)
+  );
   const canStop = isSending && !runReachedTerminal;
   const hasPrompt = Boolean(promptInput.value.trim());
-  promptInput.disabled = blockedByLimit;
-  sendButton.disabled = blockedByLimit || isSending || !hasPrompt;
+  promptInput.disabled = blockedByLimit || blockedByApproval;
+  sendButton.disabled = blockedByLimit || blockedByApproval || isSending || !hasPrompt;
   sendButton.setAttribute("aria-label", "Send message");
   sendTextEl.textContent = "Send";
   setIcon(sendIconEl, "SendHorizontal");
   stopButton.hidden = !canStop;
   limitNoticeEl.hidden = !blockedByLimit;
-  messageCountEl.textContent = `${userMessageCount(session)} of ${MAX_USER_MESSAGES_PER_SESSION} user messages used`;
+  messageCountEl.textContent = blockedByApproval
+    ? "Waiting for turbo approval"
+    : `${userMessageCount(session)} of ${MAX_USER_MESSAGES_PER_SESSION} user messages used`;
 }
 
 function renderSessionList() {
@@ -1529,15 +1403,21 @@ function renameSession(session) {
   renderActiveSession();
 }
 
-function deleteSession(session) {
+async function deleteSession(session) {
   if (isSending) return;
   if (!window.confirm(`Delete "${session.title || "New chat"}"?`)) return;
+  try {
+    const response = await fetch(`/api/threads/${encodeURIComponent(session.id)}`, { method: "DELETE" });
+    if (!response.ok) throw new Error(`Checkpoint deletion failed with ${response.status}`);
+  } catch (error) {
+    window.alert(error.message);
+    return;
+  }
   sessions = sessions.filter((item) => item.id !== session.id);
   if (!sessions.length) sessions.push(createSession());
   if (activeSessionId === session.id) activeSessionId = sessions[0].id;
   saveSessions();
   logsEl.replaceChildren();
-  resetWorkflow();
   renderActiveSession();
 }
 
@@ -1660,6 +1540,43 @@ function renderActiveSession() {
   renderUsage();
   renderSessionList();
   updateComposerState();
+  refreshThreadStatus(session);
+}
+
+async function refreshThreadStatus(session) {
+  try {
+    const response = await fetch(`/api/threads/${encodeURIComponent(session.id)}`, { cache: "no-store" });
+    if (!response.ok) return;
+    const status = await response.json();
+    if (status.status === "interrupted") {
+      const request = Array.isArray(status.interrupts) ? status.interrupts[0] : null;
+      session.pendingApproval = {
+        status: "pending",
+        userMessageId: session.pendingApproval?.userMessageId || session.history.filter((item) => item.role === "user").at(-1)?.id || "",
+        payload: { ...status, request },
+      };
+      saveSessions();
+      if (session.id === activeSessionId) {
+        renderPersistedChat();
+        updateComposerState();
+        addLog({
+          phase: "checkpoint",
+          heading: "Pending Checkpoint Restored",
+          message: `Thread ${session.id} is paused for turbo approval.`,
+          color: "#59a7ff",
+          payload: status,
+        });
+      }
+    } else if (session.pendingApproval && ["pending", "resuming"].includes(session.pendingApproval.status)) {
+      session.pendingApproval = null;
+      saveSessions();
+      if (session.id === activeSessionId) {
+        renderPersistedChat();
+        updateComposerState();
+      }
+    }
+  } catch (_) {
+  }
 }
 
 function handleTokenUsage(event) {
@@ -1703,12 +1620,6 @@ function handleTokenUsage(event) {
 }
 
 function handleLifecycleEvent(event) {
-  const step = eventStep(event);
-  if (step) {
-    setActiveStep(step);
-    if (event.phase !== "model_token") recordWorkflowEvent(event, step);
-  }
-
   updateTraceFromLifecycle(event);
 
   if (event.phase === "token_usage") {
@@ -1734,6 +1645,36 @@ function handleLifecycleEvent(event) {
 
   addLog(event);
 
+  if (event.phase === "approval_required") {
+    const approvalUserMessageId = activeTraceUserMessageId;
+    clearPendingModelText();
+    clearWorkingModelDraft({ removeStep: true });
+    finishRunTrace("interrupted");
+    runReachedTerminal = true;
+    const session = getSession(pendingSessionId || activeSessionId);
+    session.pendingApproval = {
+      status: "pending",
+      userMessageId: approvalUserMessageId || session.history.filter((item) => item.role === "user").at(-1)?.id || "",
+      payload: event.payload || {},
+    };
+    touchSession(session);
+    pendingSessionId = null;
+    saveSessions();
+    if (session.id === activeSessionId) renderPersistedChat();
+    renderSessionList();
+    updateComposerState();
+    return;
+  }
+
+  if (event.phase === "approval_decision") {
+    const session = getSession(pendingSessionId || activeSessionId);
+    if (session.pendingApproval) {
+      session.pendingApproval.status = event.payload && event.payload.approved ? "approved" : "denied";
+      touchSession(session);
+      saveSessions();
+    }
+  }
+
   if (event.phase === "state_snapshot" && event.payload && event.payload.state) {
     setDeviceState(event.payload.state);
   }
@@ -1746,6 +1687,9 @@ function handleLifecycleEvent(event) {
     finalizeAssistantMessage(finalText);
     runReachedTerminal = true;
     const session = getSession(pendingSessionId || activeSessionId);
+    if (session.pendingApproval && session.pendingApproval.status === "resuming") {
+      session.pendingApproval.status = "approved";
+    }
     session.history.push({ id: newId(), role: "assistant", content: finalText, time: formatTime(), trace: null });
     session.history = trimHistoryToUserLimit(session.history);
     touchSession(session);
@@ -1787,38 +1731,18 @@ async function sendPrompt(prompt, sessionId, userMessageId, historyForRequest) {
   runReachedTerminal = false;
   currentModelStreamTarget = "pending";
   resetStreamingAssistant();
-  resetWorkflow();
+  logsEl.replaceChildren();
   isSending = true;
   currentAbortController = new AbortController();
   beginRunTrace(userMessageId);
   updateComposerState();
   renderSessionList();
   try {
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ prompt, history: historyForRequest }),
-      signal: currentAbortController.signal,
+    await consumeLifecycleStream("/api/chat", {
+      thread_id: sessionId,
+      prompt,
+      history: historyForRequest,
     });
-    if (!response.ok || !response.body) {
-      throw new Error(`Chat request failed with ${response.status}`);
-    }
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      let boundary = buffer.indexOf("\n\n");
-      while (boundary !== -1) {
-        const block = buffer.slice(0, boundary);
-        buffer = buffer.slice(boundary + 2);
-        const event = parseSseBlock(block);
-        if (event) handleLifecycleEvent(event);
-        boundary = buffer.indexOf("\n\n");
-      }
-    }
   } catch (error) {
     if (error.name === "AbortError") {
       clearPendingModelText();
@@ -1840,15 +1764,104 @@ async function sendPrompt(prompt, sessionId, userMessageId, historyForRequest) {
     if (!runReachedTerminal && activeTrace) {
       clearPendingModelText();
       clearWorkingModelDraft({ removeStep: true });
-      appendTraceStep({ type: "error", title: "Incomplete response", content: "Deepsy did not produce a final answer.", success: false });
+      appendTraceStep({ type: "error", title: "Incomplete response", content: "Deepy did not produce a final answer.", success: false });
       finishRunTrace("error");
-      addMessage("error", "The response ended before Deepsy produced a final answer.");
+      addMessage("error", "The response ended before Deepy produced a final answer.");
     }
     isSending = false;
     currentAbortController = null;
     updateComposerState();
     renderSessionList();
     if (!promptInput.disabled) promptInput.focus();
+  }
+}
+
+async function consumeLifecycleStream(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: currentAbortController.signal,
+  });
+  if (!response.ok || !response.body) {
+    let detail = "";
+    try {
+      const payload = await response.json();
+      detail = payload.detail ? `: ${payload.detail}` : "";
+    } catch (_) {
+    }
+    throw new Error(`Chat request failed with ${response.status}${detail}`);
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const event = parseSseBlock(block);
+      if (event) handleLifecycleEvent(event);
+      boundary = buffer.indexOf("\n\n");
+    }
+  }
+}
+
+function resumeRunTrace(session, userMessageId) {
+  const userMessage = session.history.find((item) => item.id === userMessageId && item.role === "user");
+  if (!userMessage || !userMessage.trace) return;
+  userMessage.trace = normalizeRunTrace(userMessage.trace);
+  userMessage.trace.status = "running";
+  userMessage.trace.lastUpdatedAt = Date.now();
+  activeTrace = userMessage.trace;
+  activeTraceUserMessageId = userMessageId;
+  activeTraceActivity = "Resuming saved LangGraph checkpoint";
+  renderPersistedChat();
+}
+
+async function resumeApproval(session, approved) {
+  if (isSending || !session.pendingApproval || session.pendingApproval.status !== "pending") return;
+  const previousStatus = session.pendingApproval.status;
+  session.pendingApproval.status = "resuming";
+  touchSession(session);
+  saveSessions();
+  pendingSessionId = session.id;
+  runReachedTerminal = false;
+  currentModelStreamTarget = "pending";
+  resetStreamingAssistant();
+  isSending = true;
+  currentAbortController = new AbortController();
+  resumeRunTrace(session, session.pendingApproval.userMessageId);
+  updateComposerState();
+  renderSessionList();
+  try {
+    await consumeLifecycleStream("/api/chat/resume", {
+      thread_id: session.id,
+      approved,
+    });
+  } catch (error) {
+    session.pendingApproval.status = previousStatus;
+    saveSessions();
+    clearPendingModelText();
+    clearWorkingModelDraft({ removeStep: true });
+    if (activeTrace) finishRunTrace("interrupted");
+    addMessage("error", error.message);
+    runReachedTerminal = true;
+    pendingSessionId = null;
+  } finally {
+    if (!runReachedTerminal && activeTrace) {
+      finishRunTrace("interrupted");
+      session.pendingApproval.status = "pending";
+      saveSessions();
+    }
+    isSending = false;
+    currentAbortController = null;
+    renderPersistedChat();
+    updateComposerState();
+    renderSessionList();
   }
 }
 
@@ -1914,7 +1927,7 @@ function collapseComposer() {
   updateComposerExpandButton();
 }
 
-function setComposerMode(mode) {
+function setComposerMode(mode, { focus = true } = {}) {
   const previewing = mode === "preview";
   writeTabEl.classList.toggle("active", !previewing);
   previewTabEl.classList.toggle("active", previewing);
@@ -1926,9 +1939,19 @@ function setComposerMode(mode) {
   if (previewing) {
     const markdown = promptInput.value.trim();
     setMarkdown(promptPreviewEl, markdown || "*Nothing to preview yet.*");
-  } else if (!promptInput.disabled) {
+  } else if (focus && !promptInput.disabled) {
     promptInput.focus();
   }
+}
+
+function insertVoiceTranscript(transcript) {
+  const spokenText = String(transcript || "").trim();
+  if (!spokenText || promptInput.disabled) return false;
+  const currentDraft = promptInput.value.trim();
+  promptInput.value = currentDraft ? `${currentDraft}\n${spokenText}` : spokenText;
+  setComposerMode("write", { focus: false });
+  promptInput.dispatchEvent(new Event("input", { bubbles: true }));
+  return true;
 }
 
 composer.addEventListener("submit", (event) => {
@@ -1991,7 +2014,6 @@ document.getElementById("newChat").addEventListener("click", () => {
   activeSessionId = session.id;
   saveSessions();
   logsEl.replaceChildren();
-  resetWorkflow();
   renderActiveSession();
   promptInput.focus();
 });
@@ -2040,29 +2062,58 @@ document.addEventListener("click", (event) => {
   }
 });
 
-railEl.querySelectorAll("[data-step]").forEach((item) => {
-  item.addEventListener("pointerenter", () => showWorkflowTooltip(item.dataset.step, item));
-  item.addEventListener("mouseenter", () => showWorkflowTooltip(item.dataset.step, item));
-  item.addEventListener("focus", () => showWorkflowTooltip(item.dataset.step, item));
-  item.addEventListener("pointerleave", () => hideWorkflowTooltip({ delay: 140 }));
-  item.addEventListener("mouseleave", () => hideWorkflowTooltip({ delay: 140 }));
-  item.addEventListener("blur", () => hideWorkflowTooltip({ delay: 80 }));
-  item.addEventListener("click", () => {
-    selectedWorkflowStep = item.dataset.step;
-    renderWorkflowDetail();
-  });
-});
+function openVoiceModal() {
+  if (!voiceModalEl) return;
+  voiceModalEl.hidden = false;
+  document.body.classList.add("modal-open");
+  voiceLauncherEl.setAttribute("aria-expanded", "true");
+  window.requestAnimationFrame(() => voiceCloseEl.focus());
+}
 
-if (workflowTooltipEl) {
-  workflowTooltipEl.addEventListener("pointerenter", keepWorkflowTooltipOpen);
-  workflowTooltipEl.addEventListener("mouseenter", keepWorkflowTooltipOpen);
-  workflowTooltipEl.addEventListener("pointerleave", () => hideWorkflowTooltip({ delay: 80 }));
-  workflowTooltipEl.addEventListener("mouseleave", () => hideWorkflowTooltip({ delay: 80 }));
+function closeVoiceModal() {
+  if (!voiceModalEl || voiceModalEl.hidden) return;
+  voiceModalEl.hidden = true;
+  document.body.classList.remove("modal-open");
+  voiceLauncherEl.setAttribute("aria-expanded", "false");
+  voiceLauncherEl.focus();
+}
+
+if (voiceLauncherEl && voiceModalEl) {
+  voiceLauncherEl.addEventListener("click", openVoiceModal);
+  voiceCloseEl.addEventListener("click", closeVoiceModal);
+  voiceModalEl.addEventListener("click", (event) => {
+    if (event.target === voiceModalEl) closeVoiceModal();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && !voiceModalEl.hidden) closeVoiceModal();
+  });
+}
+
+let voiceModeController = null;
+if (window.RoomVoiceMode && voiceToggleEl) {
+  voiceModeController = window.RoomVoiceMode.createVoiceModeController({
+    windowRef: window,
+    documentRef: document,
+    button: voiceToggleEl,
+    buttonText: voiceToggleTextEl,
+    clearButton: voiceClearEl,
+    launcher: voiceLauncherEl,
+    strip: voiceStripEl,
+    status: voiceStatusEl,
+    statusDetail: voiceStatusDetailEl,
+    heard: voiceHeardEl,
+    alternatives: voiceAlternativesEl,
+    transcript: voiceTranscriptEl,
+    engineStatus: voiceEngineStatusEl,
+    restartCount: voiceRestartCountEl,
+    activity: voiceActivityEl,
+    onTranscript: insertVoiceTranscript,
+  });
+  voiceModeController.init();
 }
 
 collapseComposer();
 renderActiveSession();
-renderWorkflowDetail();
 refreshIcons();
 refreshHealth();
 refreshDeviceState();
@@ -2088,4 +2139,8 @@ window.RoomApp = {
   expandRunTrace,
   toggleRunTrace,
   renderRunTrace,
+  insertVoiceTranscript,
+  openVoiceModal,
+  closeVoiceModal,
+  voiceModeController,
 };

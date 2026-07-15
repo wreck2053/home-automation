@@ -42,6 +42,7 @@ async function createAppDom() {
     "vendor/highlight.min.js",
     "markdown.js",
     "tool-progress.js",
+    "voice-mode.js",
     "app.js",
   ].forEach((path) => dom.window.eval(readFileSync(new URL(path, staticRoot), "utf8")));
   await new Promise((resolve) => dom.window.setTimeout(resolve, 0));
@@ -316,38 +317,37 @@ test("composer action controls live inside the editor and send disables when emp
   dom.window.close();
 });
 
-test("workflow rail renders lucide icons for each step", async () => {
+test("logs inspector has no workflow cards or tooltip", async () => {
   const dom = await createAppDom();
-  const icons = [...dom.window.document.querySelectorAll(".workflow-step .workflow-icon")];
-  assert.deepEqual(icons.map((icon) => icon.dataset.icon), [
-    "DatabaseZap",
-    "BrainCircuit",
-    "Wrench",
-    "RefreshCw",
-    "MessageSquareText",
-  ]);
-  assert.equal(icons.filter((icon) => icon.querySelector("svg")).length, 5);
+  assert.equal(dom.window.document.getElementById("workflowTab").textContent, "Logs");
+  assert.equal(dom.window.document.querySelector(".workflow-step"), null);
+  assert.equal(dom.window.document.getElementById("workflowTooltip"), null);
+  assert.ok(dom.window.document.getElementById("logs"));
   dom.window.close();
 });
 
-test("workflow details appear in hover tooltip without dot markers", async () => {
+test("turbo interrupt renders inline approval and checkpoint log", async () => {
   const dom = await createAppDom();
-  const loadStep = dom.window.document.querySelector('.workflow-step[data-step="load_state"]');
-  const tooltip = dom.window.document.getElementById("workflowTooltip");
+  dom.window.RoomApp.beginRunTrace("turbo-user");
+  dom.window.RoomApp.handleLifecycleEvent({
+    phase: "approval_required",
+    heading: "Turbo Approval Required",
+    message: "Graph paused before activating AC turbo mode.",
+    color: "#ffd166",
+    payload: {
+      thread_id: "thread-1",
+      checkpoint_id: "checkpoint-1",
+      next_nodes: ["tools"],
+      request: { feature: "turbo", enabled: true },
+    },
+  });
 
-  assert.equal(dom.window.document.querySelectorAll(".workflow-step i").length, 0);
-  assert.equal(dom.window.document.querySelector(".workflow-detail"), null);
-  assert.equal(tooltip.hidden, true);
-
-  loadStep.dispatchEvent(new dom.window.Event("mouseenter", { bubbles: true }));
-  assert.equal(tooltip.hidden, false);
-  assert.equal(tooltip.parentElement, dom.window.document.body);
-  assert.equal(dom.window.document.getElementById("workflowDetailTitle").textContent, "Load state");
-
-  loadStep.dispatchEvent(new dom.window.Event("mouseleave", { bubbles: true }));
-  assert.equal(tooltip.hidden, false);
-  await new Promise((resolve) => dom.window.setTimeout(resolve, 160));
-  assert.equal(tooltip.hidden, true);
+  const card = dom.window.document.querySelector(".approval-card.pending");
+  assert.ok(card);
+  assert.equal(card.querySelector(".approve-button").textContent, "Approve turbo");
+  assert.equal(card.querySelector(".deny-button").textContent, "Deny");
+  assert.equal(dom.window.document.querySelector(".log-phase").textContent, "approval_required");
+  assert.equal(dom.window.document.getElementById("prompt").disabled, true);
   dom.window.close();
 });
 
@@ -669,5 +669,39 @@ test("composer expand button toggles icons and submit collapses to compact heigh
   assert.equal(preview.style.height, "112px");
   assert.equal(expand.getAttribute("aria-pressed"), "false");
   assert.equal(icon.dataset.icon, "Maximize2");
+  dom.window.close();
+});
+
+test("voice transcript appends to the composer without submitting", async () => {
+  const dom = await createAppDom();
+  const composer = dom.window.document.getElementById("composer");
+  const prompt = dom.window.document.getElementById("prompt");
+  let submitCount = 0;
+  composer.addEventListener("submit", () => { submitCount += 1; });
+  prompt.value = "existing draft";
+
+  const inserted = dom.window.RoomApp.insertVoiceTranscript("விளக்கை ஆன் பண்ணு");
+
+  assert.equal(inserted, true);
+  assert.equal(prompt.value, "existing draft\nவிளக்கை ஆன் பண்ணு");
+  assert.equal(submitCount, 0);
+  assert.equal(dom.window.document.getElementById("send").disabled, false);
+  dom.window.close();
+});
+
+test("header voice button opens and closes the diagnostic dialog", async () => {
+  const dom = await createAppDom();
+  const launcher = dom.window.document.getElementById("voiceLauncher");
+  const modal = dom.window.document.getElementById("voiceModal");
+  const close = dom.window.document.getElementById("voiceClose");
+
+  assert.equal(dom.window.document.querySelector("#composer #voiceStrip"), null);
+  assert.equal(modal.hidden, true);
+  launcher.click();
+  assert.equal(modal.hidden, false);
+  assert.equal(launcher.getAttribute("aria-expanded"), "true");
+  close.click();
+  assert.equal(modal.hidden, true);
+  assert.equal(launcher.getAttribute("aria-expanded"), "false");
   dom.window.close();
 });

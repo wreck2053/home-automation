@@ -14,7 +14,9 @@ class FakeAssistant:
     def __init__(self) -> None:
         self.history = None
 
-    async def run(self, prompt: str, history=None) -> AsyncIterator[LifecycleEvent]:
+    async def run(
+        self, prompt: str, history=None, *, thread_id: str | None = None
+    ) -> AsyncIterator[LifecycleEvent]:
         self.history = history
         yield event(
             run_id="run",
@@ -66,6 +68,34 @@ class FakeAssistant:
         pass
 
 
+class FakeCheckpointAssistant(FakeAssistant):
+    def __init__(self, status: str) -> None:
+        super().__init__()
+        self.status = status
+
+    async def thread_status(self, thread_id: str) -> dict:
+        return {"thread_id": thread_id, "status": self.status}
+
+    async def resume(
+        self, thread_id: str, approved: bool
+    ) -> AsyncIterator[LifecycleEvent]:
+        yield event(
+            run_id="run",
+            turn_id="turn",
+            phase=EventPhase.approval_decision,
+            heading="Turbo Approval Decision",
+            message="approved" if approved else "denied",
+            payload={"thread_id": thread_id, "approved": approved},
+        )
+        yield event(
+            run_id="run",
+            turn_id="turn",
+            phase=EventPhase.final,
+            heading="Final Output",
+            message="done",
+        )
+
+
 def parse_sse_events(text: str) -> list[dict]:
     import json
 
@@ -92,8 +122,9 @@ async def test_chat_stream_event_order(monkeypatch) -> None:
     ) as client:
         response = await client.post(
             "/api/chat",
-            json={
-                "prompt": "hello",
+                json={
+                    "thread_id": "browser-thread-1",
+                    "prompt": "hello",
                 "history": [{"role": "user", "content": "your name is alexa"}],
             },
         )
@@ -142,11 +173,9 @@ async def test_markdown_ui_assets_are_served_in_dependency_order() -> None:
     assert html.index("tool-progress.js") < html.index("app.js")
     assert 'id="composerExpand"' in html
     assert 'data-icon="Maximize2"' in html
-    assert 'data-icon="DatabaseZap"' in html
-    assert 'data-icon="BrainCircuit"' in html
-    assert 'data-icon="Wrench"' in html
-    assert 'data-icon="RefreshCw"' in html
-    assert 'data-icon="MessageSquareText"' in html
+    assert '>Logs</button>' in html
+    assert 'class="workflow-step"' not in html
+    assert 'id="workflowTooltip"' not in html
     assert 'data-icon="Lightbulb"' in html
     assert 'data-icon="Fan"' in html
     assert 'data-icon="Snowflake"' in html
@@ -158,3 +187,57 @@ async def test_markdown_ui_assets_are_served_in_dependency_order() -> None:
     assert 'id="clearSession"' not in html
     assert 'id="resetUsage"' not in html
     assert 'class="usage-actions"' not in html
+
+
+@pytest.mark.asyncio
+async def test_empty_checkpoint_thread_can_be_inspected_and_deleted(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    monkeypatch.setenv("ROOM_AGENT_CHECKPOINT_DB", str(tmp_path / "checkpoints.sqlite3"))
+    app = create_app()
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        status = await client.get("/api/threads/browser-thread")
+        deleted = await client.delete("/api/threads/browser-thread")
+
+    assert status.status_code == 200
+    assert status.json()["status"] == "empty"
+    assert status.json()["exists"] is False
+    assert deleted.status_code == 204
+
+
+@pytest.mark.asyncio
+async def test_pending_thread_rejects_new_prompt_and_accepts_one_resume(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    fake_assistant = FakeCheckpointAssistant("interrupted")
+    app = create_app(lambda settings: fake_assistant)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        blocked = await client.post(
+            "/api/chat",
+            json={"thread_id": "thread-1", "prompt": "new prompt"},
+        )
+        resumed = await client.post(
+            "/api/chat/resume",
+            json={"thread_id": "thread-1", "approved": True},
+        )
+        fake_assistant.status = "ready"
+        stale = await client.post(
+            "/api/chat/resume",
+            json={"thread_id": "thread-1", "approved": True},
+        )
+
+    assert blocked.status_code == 409
+    assert resumed.status_code == 200
+    assert [item["phase"] for item in parse_sse_events(resumed.text)] == [
+        "approval_decision",
+        "final",
+    ]
+    assert stale.status_code == 409

@@ -7,9 +7,12 @@ from typing import Annotated, Any, Literal, NotRequired, Protocol, TypedDict
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.tools import BaseTool
 from langchain_openai import ChatOpenAI
+from langgraph.checkpoint.base import BaseCheckpointSaver
+from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph, add_messages
 from langgraph.prebuilt import ToolNode
+from langgraph.types import Command, Interrupt
 
 from .config import Settings
 from .device import RoomDeviceClient
@@ -53,11 +56,13 @@ class RoomAssistant:
         model: ToolBindableModel,
         model_name: str = "unknown",
         tools: list[BaseTool] | None = None,
+        checkpointer: BaseCheckpointSaver | None = None,
     ) -> None:
         self.device_client = device_client
         self.tools = tools or create_room_tools(device_client)
         self.model = model
         self.model_name = model_name
+        self.checkpointer = checkpointer or InMemorySaver()
         self.model_with_tools = model.bind_tools(self.tools)
         self.graph = self._build_graph()
         self.workflow_summary = (
@@ -67,7 +72,9 @@ class RoomAssistant:
         self.workflow_mermaid = self.graph.get_graph(xray=True).draw_mermaid()
 
     @classmethod
-    def from_settings(cls, settings: Settings) -> "RoomAssistant":
+    def from_settings(
+        cls, settings: Settings, *, checkpointer: BaseCheckpointSaver | None = None
+    ) -> "RoomAssistant":
         device_client = RoomDeviceClient(
             base_url=settings.room_device_base_url_value,
             timeout_seconds=settings.room_http_timeout_seconds,
@@ -76,21 +83,49 @@ class RoomAssistant:
             device_client=device_client,
             model=build_deepseek_model(settings),
             model_name=settings.deepseek_model,
+            checkpointer=checkpointer,
         )
 
     async def aclose(self) -> None:
         await self.device_client.aclose()
 
     async def run(
-        self, prompt: str, history: Sequence[ChatHistoryMessage] | None = None
+        self,
+        prompt: str,
+        history: Sequence[ChatHistoryMessage] | None = None,
+        *,
+        thread_id: str | None = None,
     ) -> AsyncIterator[LifecycleEvent]:
+        thread_id = thread_id or new_run_id()
         run_id = new_run_id()
         turn_id = new_run_id()[:10]
-        final_message = ""
-        model_call_count = 0
-        messages = self._messages_from_history(history or [])
+        config = self._thread_config(thread_id)
+        snapshot = await self.graph.aget_state(config)
+        if snapshot.interrupts:
+            yield event(
+                run_id=run_id,
+                turn_id=turn_id,
+                phase=EventPhase.error,
+                heading="Thread Awaiting Approval",
+                message="Resolve the pending turbo approval before sending another prompt.",
+                payload=self._snapshot_payload(snapshot, thread_id),
+            )
+            return
+
+        restored = self._snapshot_exists(snapshot)
+        messages = self._messages_from_history(history or []) if not restored else []
         messages.append(HumanMessage(content=prompt))
 
+        yield self._checkpoint_event(
+            run_id,
+            turn_id,
+            "Checkpoint Thread",
+            f"{'Restored' if restored else 'Created'} LangGraph thread `{thread_id}`",
+            snapshot,
+            thread_id,
+            restored=restored,
+            bootstrap_messages=max(0, len(messages) - 1),
+        )
         yield event(
             run_id=run_id,
             turn_id=turn_id,
@@ -109,13 +144,92 @@ class RoomAssistant:
             payload={"node": "graph", "mermaid": self.workflow_mermaid},
         )
 
+        async for item in self._execute(
+            {
+                "messages": messages,
+                "run_id": run_id,
+                "turn_id": turn_id,
+            },
+            config,
+            run_id,
+            turn_id,
+            thread_id,
+            model_call_count=0,
+        ):
+            yield item
+
+    async def resume(
+        self, thread_id: str, approved: bool
+    ) -> AsyncIterator[LifecycleEvent]:
+        config = self._thread_config(thread_id)
+        snapshot = await self.graph.aget_state(config)
+        if not snapshot.interrupts:
+            run_id = new_run_id()
+            turn_id = new_run_id()[:10]
+            yield event(
+                run_id=run_id,
+                turn_id=turn_id,
+                phase=EventPhase.error,
+                heading="No Pending Approval",
+                message="This thread has no interrupt to resume.",
+                payload=self._snapshot_payload(snapshot, thread_id),
+            )
+            return
+
+        run_id = str(snapshot.values.get("run_id") or new_run_id())
+        turn_id = str(snapshot.values.get("turn_id") or new_run_id()[:10])
+        yield event(
+            run_id=run_id,
+            turn_id=turn_id,
+            phase=EventPhase.approval_decision,
+            heading="Turbo Approval Decision",
+            message="Turbo activation approved" if approved else "Turbo activation denied",
+            payload={"thread_id": thread_id, "approved": approved},
+        )
+        yield self._checkpoint_event(
+            run_id,
+            turn_id,
+            "Checkpoint Resumed",
+            f"Resuming thread `{thread_id}` from its saved interrupt",
+            snapshot,
+            thread_id,
+        )
+        model_call_count = self._current_turn_model_calls(snapshot.values.get("messages", []))
+        async for item in self._execute(
+            Command(resume=approved),
+            config,
+            run_id,
+            turn_id,
+            thread_id,
+            model_call_count=model_call_count,
+        ):
+            yield item
+
+    async def thread_status(self, thread_id: str) -> dict[str, Any]:
+        snapshot = await self.graph.aget_state(self._thread_config(thread_id))
+        payload = self._snapshot_payload(snapshot, thread_id)
+        payload["exists"] = self._snapshot_exists(snapshot)
+        payload["status"] = "interrupted" if snapshot.interrupts else (
+            "ready" if payload["exists"] else "empty"
+        )
+        return payload
+
+    async def _execute(
+        self,
+        graph_input: dict[str, Any] | Command,
+        config: dict[str, Any],
+        run_id: str,
+        turn_id: str,
+        thread_id: str,
+        *,
+        model_call_count: int,
+    ) -> AsyncIterator[LifecycleEvent]:
+        final_message = ""
+        interrupted = False
         try:
             async for chunk in self.graph.astream(
-                {
-                    "messages": messages,
-                    "run_id": run_id,
-                    "turn_id": turn_id,
-                },
+                graph_input,
+                config=config,
                 stream_mode=["updates", "messages", "custom"],
                 version="v2",
             ):
@@ -127,6 +241,24 @@ class RoomAssistant:
                     if token_event is not None:
                         yield token_event
                 elif chunk_type == "updates":
+                    interrupts = self._interrupts_from_update(chunk["data"])
+                    if interrupts:
+                        interrupted = True
+                        snapshot = await self.graph.aget_state(config)
+                        interrupt_value = interrupts[0].value
+                        yield event(
+                            run_id=run_id,
+                            turn_id=turn_id,
+                            phase=EventPhase.approval_required,
+                            heading="Turbo Approval Required",
+                            message="Graph paused before activating AC turbo mode.",
+                            payload={
+                                **self._snapshot_payload(snapshot, thread_id),
+                                "interrupt_id": interrupts[0].id,
+                                "request": interrupt_value,
+                            },
+                        )
+                        continue
                     update_events, model_call_count = self._events_from_update(
                         chunk["data"], run_id, turn_id, model_call_count
                     )
@@ -142,10 +274,21 @@ class RoomAssistant:
                 phase=EventPhase.error,
                 heading="Agent Error",
                 message=str(exc),
-                payload={"error_type": type(exc).__name__},
+                payload={"error_type": type(exc).__name__, "thread_id": thread_id},
             )
             return
 
+        if interrupted:
+            return
+        snapshot = await self.graph.aget_state(config)
+        yield self._checkpoint_event(
+            run_id,
+            turn_id,
+            "Checkpoint Saved",
+            f"Turn completed in thread `{thread_id}`",
+            snapshot,
+            thread_id,
+        )
         if final_message:
             yield event(
                 run_id=run_id,
@@ -153,8 +296,64 @@ class RoomAssistant:
                 phase=EventPhase.final,
                 heading="Final Output",
                 message=final_message,
-                payload={"content": final_message},
+                payload={"content": final_message, "thread_id": thread_id},
             )
+
+    @staticmethod
+    def _thread_config(thread_id: str) -> dict[str, Any]:
+        return {"configurable": {"thread_id": thread_id}}
+
+    @staticmethod
+    def _snapshot_exists(snapshot: Any) -> bool:
+        return bool(snapshot.config.get("configurable", {}).get("checkpoint_id"))
+
+    @staticmethod
+    def _snapshot_payload(snapshot: Any, thread_id: str) -> dict[str, Any]:
+        configurable = snapshot.config.get("configurable", {})
+        messages = snapshot.values.get("messages", []) if snapshot.values else []
+        return {
+            "thread_id": thread_id,
+            "checkpoint_id": configurable.get("checkpoint_id"),
+            "message_count": len(messages),
+            "next_nodes": list(snapshot.next),
+            "interrupts": [item.value for item in snapshot.interrupts],
+        }
+
+    def _checkpoint_event(
+        self,
+        run_id: str,
+        turn_id: str,
+        heading: str,
+        message: str,
+        snapshot: Any,
+        thread_id: str,
+        **extra: Any,
+    ) -> LifecycleEvent:
+        return event(
+            run_id=run_id,
+            turn_id=turn_id,
+            phase=EventPhase.checkpoint,
+            heading=heading,
+            message=message,
+            payload={**self._snapshot_payload(snapshot, thread_id), **extra},
+        )
+
+    @staticmethod
+    def _interrupts_from_update(update: Any) -> tuple[Interrupt, ...]:
+        if not isinstance(update, dict):
+            return ()
+        value = update.get("__interrupt__", ())
+        return tuple(item for item in value if isinstance(item, Interrupt))
+
+    @staticmethod
+    def _current_turn_model_calls(messages: Sequence[BaseMessage]) -> int:
+        count = 0
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage):
+                break
+            if isinstance(message, AIMessage):
+                count += 1
+        return count
 
     def _build_graph(self) -> Any:
         builder = StateGraph(RoomAgentState)
@@ -169,7 +368,7 @@ class RoomAssistant:
         builder.add_edge("tools", "load_state_after_tools")
         builder.add_edge("load_state_after_tools", "model")
         builder.add_edge("final_model", END)
-        return builder.compile()
+        return builder.compile(checkpointer=self.checkpointer)
 
     def _messages_from_history(
         self, history: Sequence[ChatHistoryMessage]

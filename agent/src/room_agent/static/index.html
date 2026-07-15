@@ -4,16 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="theme-color" content="#090d12">
-    <title>Deepsy Room Assistant</title>
+    <title>Deepy Room Assistant</title>
     <link rel="stylesheet" href="/static/vendor/highlight-theme.css">
-    <link rel="stylesheet" href="/static/app.css">
+    <link rel="stylesheet" href="/static/app.css?v=deepy-poc-5">
     <script src="/static/vendor/lucide.min.js" defer></script>
     <script src="/static/vendor/marked.umd.js" defer></script>
     <script src="/static/vendor/purify.min.js" defer></script>
     <script src="/static/vendor/highlight.min.js" defer></script>
     <script src="/static/markdown.js" defer></script>
     <script src="/static/tool-progress.js" defer></script>
-    <script src="/static/app.js" defer></script>
+    <script src="/static/voice-mode.js?v=deepy-poc-5" defer></script>
+    <script src="/static/app.js?v=deepy-poc-5" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -21,7 +22,7 @@
         <div class="brand-block">
           <div class="brand-line">
             <div class="brand-identity">
-              <h1>Deepsy</h1>
+              <h1>Deepy</h1>
               <span class="model-chip" id="modelName">--</span>
             </div>
             <section class="state-strip" aria-label="Current room state">
@@ -30,6 +31,11 @@
               <span class="chip" id="acChip"><span class="chip-icon" data-icon="Snowflake" aria-hidden="true"></span><span class="chip-copy"><small>AC</small><strong>--</strong></span></span>
               <span class="chip value-only" id="tempChip" aria-label="AC settings"><span class="chip-icon" data-icon="Thermometer" aria-hidden="true"></span><span class="chip-copy"><small aria-hidden="true"></small><strong>--</strong></span></span>
             </section>
+            <button class="voice-launcher" id="voiceLauncher" type="button" aria-controls="voiceModal" aria-expanded="false" title="Open voice mode">
+              <span class="button-icon" data-icon="Mic" aria-hidden="true"></span>
+              <span>Voice</span>
+              <span class="voice-launcher-dot" aria-hidden="true"></span>
+            </button>
           </div>
         </div>
 
@@ -82,7 +88,7 @@
                 <button class="composer-expand" id="composerExpand" type="button" aria-pressed="false" aria-label="Expand message editor" title="Expand message editor"><span class="button-icon" data-icon="Maximize2" aria-hidden="true"></span></button>
                 <span>Markdown supported</span>
               </div>
-              <textarea id="prompt" name="prompt" autocomplete="off" rows="2" aria-label="Message Deepsy" required></textarea>
+              <textarea id="prompt" name="prompt" autocomplete="off" rows="2" aria-label="Message Deepy" required></textarea>
               <div class="composer-preview markdown" id="promptPreview" role="tabpanel" aria-labelledby="previewTab" hidden></div>
               <div class="composer-actions" aria-label="Message actions">
                 <button class="stop-button" id="stopResponse" type="button" aria-label="Stop response" hidden><span class="button-icon" data-icon="Square" aria-hidden="true"></span></button>
@@ -92,9 +98,9 @@
           </form>
         </section>
 
-        <aside class="side-stack" aria-label="Workflow and token usage">
+        <aside class="side-stack" aria-label="Logs and token usage">
           <div class="inspector-tabs" role="tablist" aria-label="Assistant inspection panels">
-            <button class="inspector-tab active" id="workflowTab" type="button" role="tab" aria-selected="true" aria-controls="workflowPanel">Workflow</button>
+            <button class="inspector-tab active" id="workflowTab" type="button" role="tab" aria-selected="true" aria-controls="workflowPanel">Logs</button>
             <button class="inspector-tab" id="usageTab" type="button" role="tab" aria-selected="false" aria-controls="usagePanel">Token Usage</button>
           </div>
 
@@ -114,27 +120,69 @@
           </section>
 
           <section class="panel log-panel" id="workflowPanel" role="tabpanel" aria-labelledby="workflowTab" aria-label="LangGraph workflow logs">
-            <div class="workflow-overview">
-              <div class="workflow-rail" id="workflowRail" aria-label="Workflow steps">
-                <button class="workflow-step" type="button" data-step="load_state" aria-pressed="true"><span class="workflow-icon" data-icon="DatabaseZap" aria-hidden="true"></span><b>Load</b><small>state</small></button>
-                <button class="workflow-step" type="button" data-step="model" aria-pressed="false"><span class="workflow-icon" data-icon="BrainCircuit" aria-hidden="true"></span><b>Model</b><small>reason</small></button>
-                <button class="workflow-step" type="button" data-step="tools" aria-pressed="false"><span class="workflow-icon" data-icon="Wrench" aria-hidden="true"></span><b>Tools</b><small>act</small></button>
-                <button class="workflow-step" type="button" data-step="load_state_after_tools" aria-pressed="false"><span class="workflow-icon" data-icon="RefreshCw" aria-hidden="true"></span><b>Refresh</b><small>state</small></button>
-                <button class="workflow-step" type="button" data-step="final" aria-pressed="false"><span class="workflow-icon" data-icon="MessageSquareText" aria-hidden="true"></span><b>Final</b><small>reply</small></button>
-              </div>
-              <section class="workflow-tooltip" id="workflowTooltip" aria-live="polite" hidden>
-                <div class="workflow-detail-copy">
-                  <span id="workflowDetailKicker">Awaiting a run</span>
-                  <h3 id="workflowDetailTitle">Load state</h3>
-                  <p id="workflowDetailMessage"></p>
-                </div>
-                <div class="workflow-actual" id="workflowDetailActual"></div>
-              </section>
-            </div>
             <div class="logs" id="logs" aria-live="polite"></div>
           </section>
         </aside>
       </section>
     </main>
+
+    <div class="voice-modal" id="voiceModal" hidden>
+      <section class="voice-dialog" role="dialog" aria-modal="true" aria-labelledby="voiceDialogTitle">
+        <header class="voice-dialog-head">
+          <div>
+            <span class="voice-eyebrow">Browser voice lab</span>
+            <h2 id="voiceDialogTitle">Deepy Voice</h2>
+            <p>Wake-word and Tamil speech-recognition diagnostics</p>
+          </div>
+          <button class="voice-close" id="voiceClose" type="button" aria-label="Close voice mode"><span class="button-icon" data-icon="X" aria-hidden="true"></span></button>
+        </header>
+
+        <div class="voice-control-row" id="voiceStrip" data-state="idle">
+          <button class="voice-toggle button-with-icon" id="voiceToggle" type="button">
+            <span class="button-icon" data-icon="Mic" aria-hidden="true"></span>
+            <span id="voiceToggleText">Enable voice</span>
+          </button>
+          <div class="voice-state" aria-live="polite">
+            <span class="voice-state-dot" aria-hidden="true"></span>
+            <div>
+              <strong id="voiceStatus">Voice mode off</strong>
+              <span id="voiceStatusDetail">Press Enable voice to request microphone access.</span>
+            </div>
+          </div>
+          <button class="voice-clear" id="voiceClear" type="button">Clear</button>
+        </div>
+
+        <div class="voice-result-grid" aria-live="polite">
+          <article class="voice-result-card">
+            <header><span class="button-icon" data-icon="AudioLines" aria-hidden="true"></span><span>Browser heard</span></header>
+            <strong id="voiceHeard">—</strong>
+            <p id="voiceAlternatives">Recognition alternatives will appear here.</p>
+          </article>
+          <article class="voice-result-card transcript-card">
+            <header><span class="button-icon" data-icon="FileText" aria-hidden="true"></span><span>Command transcript</span></header>
+            <strong id="voiceTranscript">—</strong>
+            <p>Final text is copied into the chat composer but never submitted automatically.</p>
+          </article>
+        </div>
+
+        <dl class="voice-meta-grid">
+          <div><dt>Wake word</dt><dd>Deepy</dd></div>
+          <div><dt>Language</dt><dd>Tamil (India) · ta-IN</dd></div>
+          <div><dt>Engine</dt><dd id="voiceEngineStatus">Off</dd></div>
+          <div><dt>Recognition restarts</dt><dd id="voiceRestartCount">0</dd></div>
+        </dl>
+
+        <section class="voice-activity-section">
+          <div class="voice-activity-head">
+            <div><h3>Activity</h3><p>Recent permission, wake, result, and restart events</p></div>
+          </div>
+          <ol class="voice-activity" id="voiceActivity" aria-live="polite">
+            <li><time>—</time><span>Voice mode has not started.</span></li>
+          </ol>
+        </section>
+
+        <p class="voice-privacy-note"><span class="button-icon" data-icon="ShieldCheck" aria-hidden="true"></span>Raw audio is not stored by this application. Chrome may use its speech service for recognition.</p>
+      </section>
+    </div>
   </body>
 </html>

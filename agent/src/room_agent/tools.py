@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from typing import Annotated
 
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.tools import BaseTool, tool
+from langgraph.prebuilt import InjectedState
+from langgraph.types import interrupt
 from pydantic import Field
 
 from .device import RoomDeviceClient, tool_result_json
-from .schemas import AcFeature, AcMode, FanLevel
+from .schemas import AcFeature, AcMode, FanLevel, ToolResult
 
 
 def create_room_tools(device_client: RoomDeviceClient) -> list[BaseTool]:
@@ -66,9 +69,52 @@ def create_room_tools(device_client: RoomDeviceClient) -> list[BaseTool]:
     async def set_ac_feature(
         feature: Annotated[AcFeature, Field(description="Feature to set: swing, led, or turbo.")],
         enabled: Annotated[bool, Field(description="True enables the feature; false disables it.")],
+        messages: Annotated[list[BaseMessage], InjectedState("messages")] = [],
     ) -> str:
         """Enable or disable an AC toggle feature."""
-        return tool_result_json(await device_client.set_ac_feature(feature, enabled))
+        if (
+            feature == AcFeature.turbo
+            and not enabled
+            and messages
+            and not _explicit_turbo_disable_requested(messages)
+        ):
+            return tool_result_json(
+                ToolResult(
+                    success=False,
+                    skipped=True,
+                    action="set_ac_feature",
+                    message=(
+                        "Turbo disable blocked because the user did not explicitly "
+                        "request it; never cycle turbo off before enabling it"
+                    ),
+                )
+            )
+        if feature == AcFeature.turbo and enabled:
+            approved = interrupt(
+                {
+                    "action": "set_ac_feature",
+                    "feature": "turbo",
+                    "enabled": True,
+                    "question": "Activate AC turbo mode?",
+                }
+            )
+            if approved is not True:
+                return tool_result_json(
+                    ToolResult(
+                        success=False,
+                        skipped=True,
+                        action="set_ac_feature",
+                        message="Turbo activation denied by user",
+                    )
+                )
+        force = (
+            feature == AcFeature.turbo
+            and enabled
+            and _explicit_turbo_reactivation_requested(messages)
+        )
+        return tool_result_json(
+            await device_client.set_ac_feature(feature, enabled, force=force)
+        )
 
     @tool
     async def advance_light_color() -> str:
@@ -87,3 +133,44 @@ def create_room_tools(device_client: RoomDeviceClient) -> list[BaseTool]:
         set_ac_feature,
         advance_light_color,
     ]
+
+
+def _explicit_turbo_disable_requested(messages: list[BaseMessage]) -> bool:
+    prompt = next(
+        (
+            str(message.content).lower()
+            for message in reversed(messages)
+            if isinstance(message, HumanMessage)
+        ),
+        "",
+    )
+    disable_phrases = (
+        "disable turbo",
+        "turbo off",
+        "turn off turbo",
+        "switch off turbo",
+        "stop turbo",
+        "no turbo",
+    )
+    return any(phrase in prompt for phrase in disable_phrases)
+
+
+def _explicit_turbo_reactivation_requested(messages: list[BaseMessage]) -> bool:
+    prompt = next(
+        (
+            str(message.content).lower()
+            for message in reversed(messages)
+            if isinstance(message, HumanMessage)
+        ),
+        "",
+    )
+    reactivation_phrases = (
+        "not on",
+        "isn't on",
+        "is not on",
+        "not working",
+        "try again",
+        "turbo again",
+        "on turbo so do it",
+    )
+    return any(phrase in prompt for phrase in reactivation_phrases)

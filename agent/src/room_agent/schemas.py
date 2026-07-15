@@ -38,6 +38,9 @@ class EventPhase(str, Enum):
     token_usage = "token_usage"
     tool_call = "tool_call"
     tool_result = "tool_result"
+    checkpoint = "checkpoint"
+    approval_required = "approval_required"
+    approval_decision = "approval_decision"
     final = "final"
     error = "error"
 
@@ -79,8 +82,18 @@ class ChatHistoryMessage(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    thread_id: str = Field(
+        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    )
     prompt: str = Field(min_length=1, max_length=4000)
     history: list[ChatHistoryMessage] = Field(default_factory=list, max_length=20)
+
+
+class ResumeRequest(BaseModel):
+    thread_id: str = Field(
+        min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+    )
+    approved: bool
 
 
 class LifecycleEvent(BaseModel):

@@ -222,7 +222,9 @@ class RoomDeviceClient:
         except RoomDeviceError as exc:
             return self._error_result(action, exc)
 
-    async def set_ac_feature(self, feature: AcFeature | str, enabled: bool) -> ToolResult:
+    async def set_ac_feature(
+        self, feature: AcFeature | str, enabled: bool, *, force: bool = False
+    ) -> ToolResult:
         action = "set_ac_feature"
         try:
             ac_feature = (
@@ -238,14 +240,30 @@ class RoomDeviceClient:
         try:
             before = await self.get_state()
             current = bool(getattr(before.ac, ac_feature.value))
-            if current == enabled:
+            if current == enabled and not force:
                 return self._skipped_result(
                     action,
                     f"AC {ac_feature.value} already {'enabled' if enabled else 'disabled'}",
                     before,
                 )
-            raw_response = await self._send_command(f"/state/{ac_feature.value}")
+            if ac_feature == AcFeature.turbo:
+                path = f"/state/turbo/{'on' if enabled else 'off'}"
+                if force:
+                    path += "?force=1"
+            else:
+                path = f"/state/{ac_feature.value}"
+            raw_response = await self._send_command(path)
             after = await self.get_state()
+            actual = bool(getattr(after.ac, ac_feature.value))
+            if actual != enabled:
+                return ToolResult(
+                    success=False,
+                    action=action,
+                    message=f"AC {ac_feature.value} did not reach the requested state",
+                    before=before,
+                    after=after,
+                    raw_response=raw_response,
+                )
             return ToolResult(
                 success=True,
                 action=action,

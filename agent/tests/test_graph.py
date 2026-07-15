@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 from room_agent.device import RoomDeviceClient
 from room_agent.graph import RoomAssistant
@@ -299,3 +300,196 @@ async def test_explicit_ac_temperature_calls_ac_tool(mutable_device_transport) -
         and event.payload["tool_call"]["name"] == "set_ac_temperature"
         for event in events
     )
+
+
+class TurboToolCallingModel:
+    def bind_tools(self, tools):
+        return self
+
+    async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        system_text = next(
+            (message.content for message in messages if isinstance(message, SystemMessage)),
+            "",
+        )
+        is_planner = "Internal planning step:" in system_text
+        if any(isinstance(message, ToolMessage) for message in messages):
+            return AIMessage(content="" if is_planner else "Turbo request handled.")
+        return AIMessage(
+            content="Enabling turbo.",
+            tool_calls=[
+                {
+                    "name": "set_ac_feature",
+                    "args": {"feature": "turbo", "enabled": True},
+                    "id": "call_turbo",
+                }
+            ],
+        )
+
+
+class ResetThenEnableTurboModel:
+    def bind_tools(self, tools):
+        return self
+
+    async def ainvoke(self, messages: list[Any]) -> AIMessage:
+        system_text = next(
+            (message.content for message in messages if isinstance(message, SystemMessage)),
+            "",
+        )
+        is_planner = "Internal planning step:" in system_text
+        tool_messages = [message for message in messages if isinstance(message, ToolMessage)]
+        if not is_planner:
+            return AIMessage(content="Turbo request handled.")
+        if not tool_messages:
+            return AIMessage(
+                content="I will reset turbo first.",
+                tool_calls=[
+                    {
+                        "name": "set_ac_feature",
+                        "args": {"feature": "turbo", "enabled": False},
+                        "id": "call_turbo_off",
+                    }
+                ],
+            )
+        if len(tool_messages) == 1:
+            return AIMessage(
+                content="Now enabling turbo.",
+                tool_calls=[
+                    {
+                        "name": "set_ac_feature",
+                        "args": {"feature": "turbo", "enabled": True},
+                        "id": "call_turbo_on",
+                    }
+                ],
+            )
+        return AIMessage(content="")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approved", [True, False])
+async def test_turbo_activation_interrupts_before_device_mutation(
+    mutable_device_transport, approved: bool
+) -> None:
+    state = state_payload(ac_power=True, turbo=False)
+    calls: list[str] = []
+    base_transport = mutable_device_transport(state)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return await base_transport.handle_async_request(request)
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://device"
+    )
+    assistant = RoomAssistant(
+        device_client=RoomDeviceClient(
+            base_url="http://device", timeout_seconds=1, http_client=http_client
+        ),
+        model=TurboToolCallingModel(),
+    )
+    try:
+        first_events = [
+            item async for item in assistant.run("enable AC turbo", thread_id="turbo-thread")
+        ]
+        assert state["ac"]["turbo"] is False
+        assert "/state/turbo/on" not in calls
+        assert any(item.phase == EventPhase.approval_required for item in first_events)
+        assert (await assistant.thread_status("turbo-thread"))["status"] == "interrupted"
+
+        resumed_events = [
+            item async for item in assistant.resume("turbo-thread", approved)
+        ]
+    finally:
+        await http_client.aclose()
+
+    assert state["ac"]["turbo"] is approved
+    assert calls.count("/state/turbo/on") == (1 if approved else 0)
+    assert any(item.phase == EventPhase.approval_decision for item in resumed_events)
+    assert any(item.phase == EventPhase.final for item in resumed_events)
+
+
+@pytest.mark.asyncio
+async def test_enable_request_blocks_model_attempt_to_cycle_turbo_before_approval(
+    mutable_device_transport,
+) -> None:
+    # The ESP32 can report stale desired state after a physical remote changes the AC.
+    # Model the physical unit as off while the controller reports turbo on.
+    state = state_payload(ac_power=True, turbo=True)
+    toggle_calls: list[str] = []
+    base_transport = mutable_device_transport(state)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/state/turbo/on":
+            toggle_calls.append(request.url.path)
+        return await base_transport.handle_async_request(request)
+
+    http_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), base_url="http://device"
+    )
+    assistant = RoomAssistant(
+        device_client=RoomDeviceClient(
+            base_url="http://device", timeout_seconds=1, http_client=http_client
+        ),
+        model=ResetThenEnableTurboModel(),
+    )
+    try:
+        first_events = [
+            item
+            async for item in assistant.run(
+                "Turbo is not on, turn on turbo again", thread_id="guard-thread"
+            )
+        ]
+        assert toggle_calls == []
+        blocked = [
+            item
+            for item in first_events
+            if item.phase == EventPhase.tool_result and "disable blocked" in item.message
+        ]
+        assert blocked
+        assert any(item.phase == EventPhase.approval_required for item in first_events)
+
+        resumed_events = [item async for item in assistant.resume("guard-thread", True)]
+    finally:
+        await http_client.aclose()
+
+    assert toggle_calls == ["/state/turbo/on"]
+    assert any(item.phase == EventPhase.final for item in resumed_events)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_checkpoint_restores_thread_without_replaying_history(
+    mutable_device_transport, tmp_path
+) -> None:
+    database = tmp_path / "checkpoints.sqlite3"
+    state = state_payload()
+
+    async def run_turn(prompt: str, history=None):
+        async with AsyncSqliteSaver.from_conn_string(str(database)) as saver:
+            http_client = httpx.AsyncClient(
+                transport=mutable_device_transport(state), base_url="http://device"
+            )
+            assistant = RoomAssistant(
+                device_client=RoomDeviceClient(
+                    base_url="http://device", timeout_seconds=1, http_client=http_client
+                ),
+                model=FakeToolCallingModel(),
+                checkpointer=saver,
+            )
+            try:
+                return [
+                    item
+                    async for item in assistant.run(
+                        prompt, history=history, thread_id="persistent-thread"
+                    )
+                ]
+            finally:
+                await http_client.aclose()
+
+    await run_turn("tell me a joke")
+    second = await run_turn(
+        "tell me another joke",
+        history=[{"role": "user", "content": "this must not be replayed"}],
+    )
+    checkpoint = next(item for item in second if item.heading == "Checkpoint Thread")
+    assert checkpoint.payload["restored"] is True
+    assert checkpoint.payload["bootstrap_messages"] == 0
+    assert checkpoint.payload["message_count"] > 0
