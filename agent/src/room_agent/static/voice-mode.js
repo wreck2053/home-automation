@@ -55,6 +55,26 @@
           break;
         }
       }
+      if (overlap === 0 && comparableMerged.length && comparableNext.length) {
+        const previousRow = new Array(comparableNext.length + 1).fill(0);
+        for (const mergedToken of comparableMerged) {
+          let diagonal = 0;
+          for (let index = 1; index <= comparableNext.length; index += 1) {
+            const above = previousRow[index];
+            if (mergedToken === comparableNext[index - 1]) {
+              previousRow[index] = diagonal + 1;
+            } else {
+              previousRow[index] = Math.max(previousRow[index], previousRow[index - 1]);
+            }
+            diagonal = above;
+          }
+        }
+        const commonTokens = previousRow[comparableNext.length];
+        const similarity = commonTokens / Math.min(comparableMerged.length, comparableNext.length);
+        const sameStart = comparableMerged[0] === comparableNext[0];
+        const sameEnd = comparableMerged.at(-1) === comparableNext.at(-1);
+        if (similarity >= 0.7 && (sameStart || sameEnd)) continue;
+      }
       mergedTokens.push(...tokens.slice(overlap));
     }
     return cleanCommand(mergedTokens.join(" "));

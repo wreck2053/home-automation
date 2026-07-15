@@ -161,6 +161,10 @@ test("merges overlapping Chrome speech segments without repeating their tail", (
   assert.equal(merge(["லைட் ஆஃப் பண்ணு", "ஆஃப் பண்ணு"]), "லைட் ஆஃப் பண்ணு");
   assert.equal(merge(["ஃபேன் ஆன் பண்றியா", "பண்றியா"]), "ஃபேன் ஆன் பண்றியா");
   assert.equal(merge(["லைட் ஆஃப்", "ஆஃப் பண்ணு"]), "லைட் ஆஃப் பண்ணு");
+  assert.equal(
+    merge(["லைட்டு ஆஃப் பண்ணு", "லைட்டு இரண்டையும் ஆஃப் பண்ணு"]),
+    "லைட்டு ஆஃப் பண்ணு",
+  );
   dom.window.close();
 });
 
@@ -246,6 +250,22 @@ test("deduplicates overlapping final result slots from Chrome", async () => {
   harness.scheduler.runDelay(1200);
 
   assert.deepEqual(harness.transcripts, ["லைட் ஆஃப் பண்ணு"]);
+  harness.controller.destroy();
+  harness.dom.window.close();
+});
+
+test("ignores a highly similar restatement in a later Chrome result slot", async () => {
+  const harness = createHarness();
+  await harness.controller.enable();
+  const recognition = harness.controller.recognition();
+
+  emitResults(recognition, [
+    { alternatives: ["டிபி லைட்டு ஆஃப் பண்ணு"], isFinal: true },
+    { alternatives: ["லைட்டு இரண்டையும் ஆஃப் பண்ணு"], isFinal: true },
+  ]);
+  harness.scheduler.runDelay(1200);
+
+  assert.deepEqual(harness.transcripts, ["லைட்டு ஆஃப் பண்ணு"]);
   harness.controller.destroy();
   harness.dom.window.close();
 });
