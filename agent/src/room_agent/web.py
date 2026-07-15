@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Callable
 from contextlib import AbstractAsyncContextManager
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
@@ -18,6 +21,8 @@ from .schemas import ChatRequest, EventPhase, LifecycleEvent, ResumeRequest
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+MAX_TRANSCRIPTION_BYTES = 2 * 1024 * 1024
+TRANSCRIPTION_CONTENT_TYPES = {"audio/wav", "audio/x-wav", "audio/wave"}
 
 
 class AssistantLike(Protocol):
@@ -148,6 +153,24 @@ def create_app(assistant_factory: AssistantFactory | None = None) -> FastAPI:
                 raise HTTPException(status_code=503, detail=str(exc)) from exc
             return state.model_dump(mode="json")
 
+    @app.post("/api/voice/transcribe")
+    async def transcribe_voice(request: Request) -> dict:
+        settings = load_settings()
+        if not settings.has_openrouter_api_key:
+            raise HTTPException(status_code=503, detail="OPENROUTER_API_KEY is required")
+        content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+        if content_type not in TRANSCRIPTION_CONTENT_TYPES:
+            raise HTTPException(status_code=415, detail="A WAV audio body is required")
+        content_length = request.headers.get("content-length")
+        if content_length and content_length.isdigit() and int(content_length) > MAX_TRANSCRIPTION_BYTES:
+            raise HTTPException(status_code=413, detail="Audio recording is too large")
+        audio = await request.body()
+        if not audio:
+            raise HTTPException(status_code=400, detail="Audio recording is empty")
+        if len(audio) > MAX_TRANSCRIPTION_BYTES:
+            raise HTTPException(status_code=413, detail="Audio recording is too large")
+        return await _transcribe_voice_audio(audio, settings)
+
     @app.get("/health")
     async def health() -> dict:
         settings = load_settings()
@@ -171,6 +194,53 @@ def create_app(assistant_factory: AssistantFactory | None = None) -> FastAPI:
         }
 
     return app
+
+
+async def _transcribe_voice_audio(audio: bytes, settings: Settings) -> dict:
+    started = perf_counter()
+    try:
+        async with httpx.AsyncClient(timeout=settings.openrouter_timeout_seconds) as client:
+            response = await client.post(
+                f"{settings.openrouter_base_url_value}/audio/transcriptions",
+                headers={
+                    "Authorization": f"Bearer {settings.openrouter_api_key_value}",
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": "http://127.0.0.1:8000",
+                    "X-OpenRouter-Title": "Deepy Voice Lab",
+                },
+                json={
+                    "model": settings.openrouter_transcribe_model,
+                    "temperature": 0,
+                    "input_audio": {
+                        "data": base64.b64encode(audio).decode("ascii"),
+                        "format": "wav",
+                    },
+                },
+            )
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Transcription service timed out") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Transcription service is unavailable") from exc
+
+    upstream_latency_ms = round((perf_counter() - started) * 1000)
+    if response.status_code >= 400:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Transcription service rejected the request ({response.status_code})",
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail="Transcription service returned invalid JSON") from exc
+    text = payload.get("text") if isinstance(payload, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        raise HTTPException(status_code=502, detail="Transcription service returned no text")
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else None
+    return {
+        "text": text.strip(),
+        "upstream_latency_ms": upstream_latency_ms,
+        "usage": usage,
+    }
 
 
 async def _open_assistant(

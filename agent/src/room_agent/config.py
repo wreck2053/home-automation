@@ -15,6 +15,16 @@ class Settings(BaseSettings):
     deepseek_base_url: AnyHttpUrl = Field(
         default="https://api.deepseek.com", alias="DEEPSEEK_BASE_URL"
     )
+    openrouter_api_key: SecretStr | None = Field(default=None, alias="OPENROUTER_API_KEY")
+    openrouter_base_url: AnyHttpUrl = Field(
+        default="https://openrouter.ai/api/v1", alias="OPENROUTER_BASE_URL"
+    )
+    openrouter_transcribe_model: str = Field(
+        default="openai/gpt-4o-transcribe", alias="OPENROUTER_TRANSCRIBE_MODEL"
+    )
+    openrouter_timeout_seconds: float = Field(
+        default=30.0, gt=0, alias="OPENROUTER_TIMEOUT_SECONDS"
+    )
     room_device_base_url: AnyHttpUrl = Field(
         default="http://192.168.0.108", alias="ROOM_DEVICE_BASE_URL"
     )
@@ -43,6 +53,14 @@ class Settings(BaseSettings):
             raise ValueError("DEEPSEEK_MODEL cannot be empty")
         return stripped
 
+    @field_validator("openrouter_transcribe_model")
+    @classmethod
+    def validate_openrouter_transcribe_model(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("OPENROUTER_TRANSCRIBE_MODEL cannot be empty")
+        return stripped
+
     @property
     def deepseek_api_key_value(self) -> str:
         if self.deepseek_api_key is None:
@@ -57,6 +75,19 @@ class Settings(BaseSettings):
         return str(self.deepseek_base_url).rstrip("/")
 
     @property
+    def openrouter_api_key_value(self) -> str:
+        if self.openrouter_api_key is None:
+            raise RuntimeError("OPENROUTER_API_KEY is required for voice transcription")
+        value = self.openrouter_api_key.get_secret_value().strip()
+        if not value:
+            raise RuntimeError("OPENROUTER_API_KEY is required for voice transcription")
+        return value
+
+    @property
+    def openrouter_base_url_value(self) -> str:
+        return str(self.openrouter_base_url).rstrip("/")
+
+    @property
     def room_device_base_url_value(self) -> str:
         return str(self.room_device_base_url).rstrip("/")
 
@@ -65,6 +96,12 @@ class Settings(BaseSettings):
         if self.deepseek_api_key is None:
             return False
         return bool(self.deepseek_api_key.get_secret_value().strip())
+
+    @property
+    def has_openrouter_api_key(self) -> bool:
+        if self.openrouter_api_key is None:
+            return False
+        return bool(self.openrouter_api_key.get_secret_value().strip())
 
     @property
     def checkpoint_db_path(self) -> Path:
@@ -79,6 +116,10 @@ class Settings(BaseSettings):
             "room_device_base_url": self.room_device_base_url_value,
             "room_http_timeout_seconds": self.room_http_timeout_seconds,
             "deepseek_max_output_tokens": self.deepseek_max_output_tokens,
+            "openrouter_api_key": "***" if self.has_openrouter_api_key else None,
+            "openrouter_base_url": self.openrouter_base_url_value,
+            "openrouter_transcribe_model": self.openrouter_transcribe_model,
+            "openrouter_timeout_seconds": self.openrouter_timeout_seconds,
             "checkpoint_db": str(self.checkpoint_db_path),
         }
 

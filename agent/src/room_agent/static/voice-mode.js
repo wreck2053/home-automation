@@ -4,7 +4,9 @@
   const WAKE_WORD_ALIASES = [
     "deepy",
     "deep e",
+    "deep i",
     "deepie",
+    "deepi",
     "deep ee",
     "dp",
     "டீபி",
@@ -100,6 +102,7 @@
         const wakeStart = match.index + match[0].indexOf(matchedWakeWord);
         return {
           alias,
+          matchedWakeWord,
           transcript: original,
           normalizedTranscript: transcript,
           command: cleanCommand(original.slice(wakeStart + matchedWakeWord.length)),
@@ -107,6 +110,128 @@
       }
     }
     return null;
+  }
+
+  function encodeMonoWav(chunks, inputRate, BlobCtor = Blob, outputRate = 16000) {
+    const inputLength = chunks.reduce((total, chunk) => total + chunk.length, 0);
+    const input = new Float32Array(inputLength);
+    let inputOffset = 0;
+    for (const chunk of chunks) {
+      input.set(chunk, inputOffset);
+      inputOffset += chunk.length;
+    }
+
+    const rate = Math.min(inputRate, outputRate);
+    const ratio = inputRate / rate;
+    const outputLength = Math.max(1, Math.floor(input.length / ratio));
+    const samples = new Float32Array(outputLength);
+    for (let index = 0; index < outputLength; index += 1) {
+      const start = Math.floor(index * ratio);
+      const end = Math.max(start + 1, Math.min(input.length, Math.floor((index + 1) * ratio)));
+      let total = 0;
+      for (let cursor = start; cursor < end; cursor += 1) total += input[cursor];
+      samples[index] = total / (end - start);
+    }
+
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
+    const view = new DataView(buffer);
+    const writeText = (offset, text) => {
+      for (let index = 0; index < text.length; index += 1) view.setUint8(offset + index, text.charCodeAt(index));
+    };
+    writeText(0, "RIFF");
+    view.setUint32(4, 36 + samples.length * 2, true);
+    writeText(8, "WAVE");
+    writeText(12, "fmt ");
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true);
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true);
+    view.setUint16(32, 2, true);
+    view.setUint16(34, 16, true);
+    writeText(36, "data");
+    view.setUint32(40, samples.length * 2, true);
+    samples.forEach((sample, index) => {
+      const clamped = Math.max(-1, Math.min(1, sample));
+      view.setInt16(44 + index * 2, clamped < 0 ? clamped * 0x8000 : clamped * 0x7fff, true);
+    });
+    return new BlobCtor([buffer], { type: "audio/wav" });
+  }
+
+  async function createPcmAudioCapture({ windowRef, stream, preRollSeconds = 3, onAudioFrame = null }) {
+    const AudioContext = windowRef.AudioContext || windowRef.webkitAudioContext;
+    if (!AudioContext) throw new Error("Web Audio capture is unavailable in this browser.");
+    const context = new AudioContext();
+    const source = context.createMediaStreamSource(stream);
+    const processor = context.createScriptProcessor(4096, 1, 1);
+    const silentOutput = context.createGain();
+    silentOutput.gain.value = 0;
+
+    let rolling = [];
+    let rollingSamples = 0;
+    let active = null;
+    const maximumRollingSamples = Math.ceil(context.sampleRate * preRollSeconds);
+
+    processor.onaudioprocess = (event) => {
+      const chunk = new Float32Array(event.inputBuffer.getChannelData(0));
+      if (onAudioFrame) {
+        let energy = 0;
+        for (const sample of chunk) energy += sample * sample;
+        onAudioFrame({ rms: Math.sqrt(energy / Math.max(1, chunk.length)) });
+      }
+      if (active) {
+        active.push(chunk);
+        return;
+      }
+      rolling.push(chunk);
+      rollingSamples += chunk.length;
+      while (rollingSamples > maximumRollingSamples && rolling.length) {
+        const overflow = rollingSamples - maximumRollingSamples;
+        if (overflow >= rolling[0].length) {
+          rollingSamples -= rolling[0].length;
+          rolling.shift();
+        } else {
+          rolling[0] = rolling[0].slice(overflow);
+          rollingSamples -= overflow;
+        }
+      }
+    };
+    source.connect(processor);
+    processor.connect(silentOutput);
+    silentOutput.connect(context.destination);
+    await context.resume();
+
+    return {
+      begin() {
+        active = rolling;
+        rolling = [];
+        rollingSamples = 0;
+      },
+      finish() {
+        const chunks = active || [];
+        active = null;
+        rolling = [];
+        rollingSamples = 0;
+        return encodeMonoWav(chunks, context.sampleRate, windowRef.Blob);
+      },
+      cancel() {
+        active = null;
+        rolling = [];
+        rollingSamples = 0;
+      },
+      suspend() {
+        return context.suspend();
+      },
+      resume() {
+        return context.resume();
+      },
+      destroy() {
+        processor.disconnect();
+        source.disconnect();
+        silentOutput.disconnect();
+        void context.close();
+      },
+    };
   }
 
   function createVoiceModeController(options = {}) {
@@ -124,31 +249,47 @@
     const transcript = options.transcript;
     const engineStatus = options.engineStatus;
     const restartCount = options.restartCount;
+    const latency = options.latency;
     const activity = options.activity;
-    const onTranscript = options.onTranscript || (() => {});
     const Recognition = options.Recognition || windowRef.SpeechRecognition || windowRef.webkitSpeechRecognition;
     const mediaDevices = options.mediaDevices || (windowRef.navigator && windowRef.navigator.mediaDevices);
+    const fetchRef = options.fetchRef || windowRef.fetch.bind(windowRef);
+    const captureFactory = options.createAudioCapture || createPcmAudioCapture;
     const schedule = options.setTimeout || windowRef.setTimeout.bind(windowRef);
     const cancel = options.clearTimeout || windowRef.clearTimeout.bind(windowRef);
-    const silenceMs = options.silenceMs ?? 2200;
-    const speechEndMs = options.speechEndMs ?? 800;
-    const recognitionEndMs = options.recognitionEndMs ?? 450;
-    const hardTimeoutMs = options.hardTimeoutMs ?? 12000;
+    const now = options.now || (() => windowRef.performance.now());
+    const silenceMs = options.silenceMs ?? 900;
+    const finalResultMs = options.finalResultMs ?? 250;
+    const speechEndMs = options.speechEndMs ?? 350;
+    const recognitionEndMs = options.recognitionEndMs ?? 250;
+    // This is only a runaway-recording guard. Normal commands end through VAD silence.
+    const hardTimeoutMs = options.hardTimeoutMs ?? 60000;
     const restartMs = options.restartMs ?? 250;
+    const vadSilenceMs = options.vadSilenceMs ?? 900;
+    const vadArmMs = options.vadArmMs ?? 160;
+    const speechThresholdRms = options.speechThresholdRms ?? 0.008;
+    const speechNoiseMultiplier = options.speechNoiseMultiplier ?? 2.5;
 
     let recognition = null;
     let recognitionActive = false;
+    let mediaStream = null;
+    let audioCapture = null;
+    let requestController = null;
     let enabled = false;
     let paused = false;
     let mode = "idle";
+    let commandHeard = false;
     let recognitionCycle = 0;
     let restarts = 0;
     let activityInitialized = false;
     let silenceTimer = null;
     let hardTimer = null;
     let restartTimer = null;
-    const finalSegments = new Map();
-    const interimSegments = new Map();
+    let vadArmTimer = null;
+    let recognitionRefreshRequested = false;
+    let commandAudioArmed = false;
+    let localSpeechDetected = false;
+    let noiseFloorRms = 0.002;
 
     function setText(element, value) {
       if (element) element.textContent = value;
@@ -159,7 +300,8 @@
         idle: "Off",
         requesting: "Requesting permission",
         armed: "Listening for wake word",
-        listening: "Capturing command",
+        listening: "Recording command",
+        transcribing: "Transcribing command",
         paused: "Paused",
         denied: "Permission denied",
         unsupported: "Unsupported",
@@ -208,85 +350,175 @@
     function clearCommandTimers() {
       clearTimer(silenceTimer);
       clearTimer(hardTimer);
+      clearTimer(vadArmTimer);
       silenceTimer = null;
       hardTimer = null;
+      vadArmTimer = null;
     }
 
-    function sortedSegments() {
-      const segments = [...finalSegments.values(), ...interimSegments.values()];
-      return segments.sort((left, right) => left.cycle - right.cycle || left.index - right.index);
+    function resetCommand({ cancelRequest = false, preserveBufferedAudio = false } = {}) {
+      commandHeard = false;
+      commandAudioArmed = false;
+      localSpeechDetected = false;
+      clearCommandTimers();
+      if (audioCapture && !preserveBufferedAudio) audioCapture.cancel();
+      if (cancelRequest && requestController) requestController.abort();
+      requestController = null;
     }
 
-    function combinedCommand() {
-      return mergeSpeechSegments(sortedSegments().map((segment) => segment.text));
-    }
-
-    function renderArmed(detail = "Say “Deepy” followed by a Tamil command.") {
+    function renderArmed(detail = "Say “Deepy” followed by a command.") {
       mode = "armed";
       render("armed", "Waiting for “Deepy”", detail);
     }
 
-    function renderListening() {
-      render("listening", "Listening for your command", "Speak naturally, then pause when finished.");
-      setText(transcript, combinedCommand() || "Listening…");
+    function renderListening(detail = "Listening live. Pause briefly when your command is finished.") {
+      render("listening", "Recording your command", detail);
     }
 
-    function resetCommand() {
-      finalSegments.clear();
-      interimSegments.clear();
-      clearCommandTimers();
-    }
-
-    function finalizeCommand(reason = "silence") {
-      const command = combinedCommand();
-      resetCommand();
-      if (command) {
-        setText(transcript, command);
-        onTranscript(command);
-        logActivity(`Command finalized after ${reason}: ${command}`);
-        renderArmed("Transcript copied to the composer. Say “Deepy” again when ready.");
-      } else {
-        setText(transcript, "—");
-        logActivity("Wake word detected, but no command was captured.");
-        renderArmed("No command heard. Say “Deepy” to try again.");
+    function refreshWakeRecognition() {
+      clearTimer(restartTimer);
+      restartTimer = null;
+      if (!enabled || paused || !recognition) return;
+      if (!recognitionActive) {
+        scheduleRestart();
+        return;
+      }
+      recognitionRefreshRequested = true;
+      try {
+        recognition.abort();
+      } catch (error) {
+        recognitionRefreshRequested = false;
+        recognitionActive = false;
+        logActivity(`Wake recognition refresh failed: ${String((error && error.message) || error)}`);
+        configureRecognition();
+        scheduleRestart();
       }
     }
 
     function scheduleSilence(delay = silenceMs, reason = "silence") {
       clearTimer(silenceTimer);
-      silenceTimer = schedule(() => finalizeCommand(reason), delay);
+      silenceTimer = schedule(() => void finalizeCommand(reason), delay);
     }
 
-    function commandText(value) {
-      const wake = findWakeWord(value);
-      return wake ? wake.command : cleanCommand(value);
-    }
-
-    function setCommandSegment(key, cycle, index, value, isFinal) {
-      const text = commandText(value);
-      if (!text) {
-        interimSegments.delete(key);
-        if (!isFinal) finalSegments.delete(key);
-        renderListening();
+    function handleAudioFrame(frame) {
+      const rms = Number(frame && frame.rms);
+      if (!Number.isFinite(rms)) return;
+      if (mode !== "listening" || !commandAudioArmed) {
+        if (rms < 0.03) noiseFloorRms = noiseFloorRms * 0.98 + rms * 0.02;
         return;
       }
-      const segment = { key, cycle, index, text };
-      if (isFinal) {
-        finalSegments.set(key, segment);
-        interimSegments.delete(key);
-      } else if (!finalSegments.has(key)) {
-        interimSegments.set(key, segment);
+
+      const startThreshold = Math.max(
+        speechThresholdRms,
+        Math.min(0.04, noiseFloorRms * speechNoiseMultiplier),
+      );
+      const threshold = localSpeechDetected
+        ? Math.max(speechThresholdRms * 0.55, startThreshold * 0.6)
+        : startThreshold;
+      if (rms < threshold) {
+        noiseFloorRms = noiseFloorRms * 0.995 + rms * 0.005;
+        return;
       }
-      renderListening();
-      scheduleSilence();
+
+      const firstSpeechFrame = !localSpeechDetected;
+      localSpeechDetected = true;
+      commandHeard = true;
+      if (firstSpeechFrame) {
+        logActivity("Local voice activity detected for the command.");
+        renderListening("Speech detected. Pause briefly when your command is finished.");
+      }
+      scheduleSilence(vadSilenceMs, "local voice activity");
     }
 
-    function beginCommand(value, isFinal, resultIndex) {
+    async function finalizeCommand(reason = "silence") {
+      if (mode !== "listening") return;
+      clearCommandTimers();
+      if (!commandHeard) {
+        if (audioCapture) audioCapture.cancel();
+        setText(transcript, "—");
+        logActivity("Wake word detected, but no command was captured.");
+        renderArmed("No command heard. Say “Deepy” to try again.");
+        refreshWakeRecognition();
+        return;
+      }
+
+      mode = "transcribing";
+      setText(transcript, "Transcribing…");
+      render("transcribing", "Transcribing command", "Sending the captured command to GPT-4o Transcribe.");
+      const recording = audioCapture.finish();
+      const capturedSeconds = Math.max(0, (recording.size - 44) / (16000 * 2));
+      requestController = new windowRef.AbortController();
+      const thisRequest = requestController;
+      const started = now();
+      try {
+        const response = await fetchRef("/api/voice/transcribe", {
+          method: "POST",
+          headers: { "Content-Type": "audio/wav" },
+          body: recording,
+          signal: thisRequest.signal,
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(payload.detail || `Transcription failed (${response.status})`);
+        if (thisRequest.signal.aborted || !enabled) return;
+        const rawText = cleanCommand(payload.text);
+        const wake = findWakeWord(rawText);
+        const command = wake ? wake.command : rawText;
+        const elapsedMs = Math.max(0, Math.round(now() - started));
+        if (!command) {
+          setText(transcript, "—");
+          setText(latency, `${elapsedMs} ms`);
+          logActivity("Only the wake word was transcribed; no command was submitted.");
+          renderArmed("No command heard. Say “Deepy” followed by a command.");
+          refreshWakeRecognition();
+          return;
+        }
+        setText(transcript, command);
+        setText(latency, `${elapsedMs} ms`);
+        const upstream = Number(payload.upstream_latency_ms);
+        const upstreamDetail = Number.isFinite(upstream) ? `; OpenRouter ${Math.round(upstream)} ms` : "";
+        const billedSeconds = Number(payload.usage && payload.usage.seconds);
+        const audioDetail = Number.isFinite(billedSeconds)
+          ? `${billedSeconds.toFixed(1)} s billed`
+          : `${capturedSeconds.toFixed(1)} s captured`;
+        logActivity(`Command transcribed after ${reason} in ${elapsedMs} ms${upstreamDetail}; ${audioDetail}: ${command}`);
+        renderArmed(`Transcribed in ${elapsedMs} ms. Say “Deepy” again when ready.`);
+        refreshWakeRecognition();
+      } catch (error) {
+        if (error && error.name === "AbortError") return;
+        if (!enabled) return;
+        const message = String((error && error.message) || error || "Transcription failed");
+        setText(transcript, "Transcription failed");
+        setText(latency, "Failed");
+        logActivity(`Transcription failed: ${message}`);
+        renderArmed(`${message}. Say “Deepy” to try again.`);
+        refreshWakeRecognition();
+      } finally {
+        if (requestController === thisRequest) requestController = null;
+        commandHeard = false;
+      }
+    }
+
+    function beginCommand(wake, isFinal) {
+      resetCommand({ preserveBufferedAudio: true });
       mode = "listening";
-      resetCommand();
-      hardTimer = schedule(() => finalizeCommand("maximum command time"), hardTimeoutMs);
-      const key = `${recognitionCycle}:${resultIndex}`;
-      setCommandSegment(key, recognitionCycle, resultIndex, value, isFinal);
+      commandHeard = Boolean(wake.command);
+      commandAudioArmed = commandHeard;
+      audioCapture.begin();
+      setText(transcript, "Recording…");
+      hardTimer = schedule(() => void finalizeCommand("maximum command time"), hardTimeoutMs);
+      if (!commandAudioArmed) {
+        vadArmTimer = schedule(() => {
+          vadArmTimer = null;
+          commandAudioArmed = true;
+          renderListening("Wake word detected. Listening live for your command.");
+        }, vadArmMs);
+      }
+      if (commandHeard) {
+        scheduleSilence(
+          isFinal ? finalResultMs : silenceMs,
+          isFinal ? "final recognition result" : "silence",
+        );
+      }
       renderListening();
     }
 
@@ -306,30 +538,38 @@
         const result = event.results[index];
         const resultAlternatives = alternativesFor(result);
         const primary = resultAlternatives[0] || "";
-        if (primary) setText(heard, primary);
-        setText(
-          alternatives,
-          resultAlternatives.length > 1
-            ? `Alternatives: ${resultAlternatives.slice(1).join(" · ")}`
-            : "No alternate recognition result returned.",
-        );
 
         if (mode === "armed") {
-          let wake = null;
-          for (const alternative of resultAlternatives) {
-            wake = findWakeWord(alternative);
-            if (wake) break;
-          }
+          const wakeMatches = resultAlternatives.map((alternative) => findWakeWord(alternative)).filter(Boolean);
+          const wake = wakeMatches[0] || null;
           if (!wake) continue;
-          setText(heard, wake.transcript);
+          setText(heard, wake.matchedWakeWord);
+          const alternateWakeWords = wakeMatches
+            .slice(1)
+            .map((match) => match.matchedWakeWord)
+            .filter((value, matchIndex, values) => values.indexOf(value) === matchIndex);
+          setText(
+            alternatives,
+            alternateWakeWords.length
+              ? `Wake alternatives: ${alternateWakeWords.join(" · ")}`
+              : "No alternate wake-word match returned.",
+          );
           logActivity(`Wake word matched as “${wake.alias}”.`);
-          beginCommand(wake.transcript, Boolean(result.isFinal), index);
+          beginCommand(wake, Boolean(result.isFinal));
           continue;
         }
 
         if (mode === "listening") {
-          const key = `${recognitionCycle}:${index}`;
-          setCommandSegment(key, recognitionCycle, index, primary, Boolean(result.isFinal));
+          const commandText = cleanCommand((findWakeWord(primary) || {}).command || primary);
+          if (!commandText) continue;
+          commandHeard = true;
+          renderListening();
+          if (!localSpeechDetected) {
+            scheduleSilence(
+              result.isFinal ? finalResultMs : silenceMs,
+              result.isFinal ? "final recognition result" : "silence",
+            );
+          }
         }
       }
     }
@@ -342,7 +582,7 @@
       } catch (error) {
         if (!error || error.name !== "InvalidStateError") {
           logActivity(`Recognition start failed: ${String((error && error.message) || error)}`);
-          render("error", "Voice recognition failed", String((error && error.message) || error));
+          render("error", "Wake recognition failed", String((error && error.message) || error));
         }
       }
     }
@@ -357,40 +597,52 @@
     }
 
     function configureRecognition() {
-      recognition = new Recognition();
-      recognition.lang = "ta-IN";
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.maxAlternatives = 3;
-      recognition.onstart = () => {
+      const configuredRecognition = new Recognition();
+      recognition = configuredRecognition;
+      configuredRecognition.lang = "en-IN";
+      configuredRecognition.continuous = true;
+      configuredRecognition.interimResults = true;
+      configuredRecognition.maxAlternatives = 3;
+      configuredRecognition.onstart = () => {
+        if (recognition !== configuredRecognition) return;
         recognitionActive = true;
         recognitionCycle += 1;
         restarts = Math.max(0, recognitionCycle - 1);
-        logActivity(restarts ? `Recognition restarted (${restarts}).` : "Recognition started in Tamil (ta-IN)." );
-        if (mode !== "listening") renderArmed();
-        else renderListening();
+        logActivity(restarts ? `Wake recognition restarted (${restarts}).` : "Wake recognition started in English (en-IN)." );
+        if (mode === "armed") renderArmed();
+        else if (mode === "listening") renderListening();
       };
-      recognition.onspeechend = () => {
-        if (mode === "listening" && combinedCommand()) scheduleSilence(speechEndMs, "end of speech");
+      configuredRecognition.onspeechend = () => {
+        if (mode === "listening" && commandHeard && !localSpeechDetected) {
+          scheduleSilence(speechEndMs, "end of speech");
+        }
       };
-      recognition.onresult = handleResult;
-      recognition.onend = () => {
+      configuredRecognition.onresult = handleResult;
+      configuredRecognition.onend = () => {
+        if (recognition !== configuredRecognition) return;
         recognitionActive = false;
-        if (enabled && !paused) logActivity("Recognition stream ended; restarting automatically.");
-        if (mode === "listening" && combinedCommand()) {
+        const wasRefresh = recognitionRefreshRequested;
+        recognitionRefreshRequested = false;
+        if (enabled && !paused) {
+          logActivity(wasRefresh
+            ? "Wake recognition refreshed for the next command."
+            : "Wake recognition stream ended; restarting automatically.");
+        }
+        if (mode === "listening" && commandHeard && !localSpeechDetected) {
           scheduleSilence(recognitionEndMs, "recognition stream end");
         }
+        if (enabled && !paused) configureRecognition();
         scheduleRestart();
       };
-      recognition.onerror = (event) => {
+      configuredRecognition.onerror = (event) => {
         const error = event && event.error;
-        if (error && error !== "no-speech" && error !== "aborted") logActivity(`Recognition error: ${error}.`);
+        if (error && error !== "no-speech" && error !== "aborted") logActivity(`Wake recognition error: ${error}.`);
         if (error === "not-allowed" || error === "service-not-allowed") {
           disable("Microphone permission denied. Allow microphone access and enable voice again.", "denied");
         } else if (error === "audio-capture") {
           disable("No microphone is available to Chrome.", "error");
         } else if (error === "network") {
-          render("error", "Speech service unavailable", "Network error; Chrome will retry.");
+          render("error", "Wake service unavailable", "Network error; Chrome will retry.");
         }
       };
     }
@@ -401,20 +653,26 @@
       logActivity("Requesting microphone permission.");
       render("requesting", "Requesting microphone access", "Approve the browser microphone prompt to continue.");
       try {
-        const stream = await mediaDevices.getUserMedia({ audio: true });
-        if (stream && typeof stream.getTracks === "function") {
-          stream.getTracks().forEach((track) => track.stop());
-        }
-      } catch (_) {
+        mediaStream = await mediaDevices.getUserMedia({ audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true } });
+        audioCapture = await captureFactory({
+          windowRef,
+          stream: mediaStream,
+          preRollSeconds: 3,
+          onAudioFrame: handleAudioFrame,
+        });
+      } catch (error) {
         enabled = false;
-        logActivity("Microphone permission was denied.");
-        render("denied", "Microphone permission denied", "Allow microphone access in Chrome, then try again.");
+        if (mediaStream && typeof mediaStream.getTracks === "function") mediaStream.getTracks().forEach((track) => track.stop());
+        mediaStream = null;
+        logActivity("Microphone access or audio capture initialization failed.");
+        render("denied", "Microphone unavailable", String((error && error.message) || "Allow microphone access, then try again."));
         return;
       }
-      logActivity("Microphone permission granted.");
+      logActivity("Microphone permission granted; local command buffer active.");
       if (!recognition) configureRecognition();
       paused = Boolean(documentRef.hidden);
       if (paused) {
+        void audioCapture.suspend();
         render("paused", "Voice mode paused", "Return to this tab to resume listening.");
       } else {
         renderArmed();
@@ -427,7 +685,8 @@
       enabled = false;
       paused = false;
       mode = "idle";
-      resetCommand();
+      recognitionRefreshRequested = false;
+      resetCommand({ cancelRequest: true });
       clearTimer(restartTimer);
       restartTimer = null;
       if (recognition) {
@@ -437,21 +696,23 @@
           // The recognizer may already be stopped.
         }
       }
+      recognition = null;
       recognitionActive = false;
-      const labels = {
-        idle: "Voice mode off",
-        denied: "Microphone permission denied",
-        error: "Voice mode unavailable",
-      };
+      if (audioCapture) audioCapture.destroy();
+      audioCapture = null;
+      if (mediaStream && typeof mediaStream.getTracks === "function") mediaStream.getTracks().forEach((track) => track.stop());
+      mediaStream = null;
+      const labels = { idle: "Voice mode off", denied: "Microphone permission denied", error: "Voice mode unavailable" };
       if (wasEnabled) logActivity(state === "idle" ? "Voice mode stopped." : detail);
       render(state, labels[state] || "Voice mode unavailable", detail);
     }
 
     function clearDiagnostics() {
-      resetCommand();
+      resetCommand({ cancelRequest: true });
       setText(heard, "—");
       setText(transcript, "—");
-      setText(alternatives, "Recognition alternatives will appear here.");
+      setText(latency, "—");
+      setText(alternatives, "Wake recognition alternatives will appear here.");
       if (activity) activity.replaceChildren();
       activityInitialized = true;
       logActivity("Voice diagnostics cleared.");
@@ -467,16 +728,18 @@
       if (!enabled) return;
       paused = Boolean(documentRef.hidden);
       if (paused) {
-        resetCommand();
+        resetCommand({ cancelRequest: true });
         mode = "armed";
         clearTimer(restartTimer);
         restartTimer = null;
         if (recognition) recognition.abort();
         recognitionActive = false;
+        if (audioCapture) void audioCapture.suspend();
         logActivity("Voice mode paused because the page was hidden.");
         render("paused", "Voice mode paused", "Return to this tab to resume listening.");
       } else {
-        logActivity("Page visible; resuming recognition.");
+        if (audioCapture) void audioCapture.resume();
+        logActivity("Page visible; resuming wake recognition.");
         renderArmed();
         startRecognition();
       }
@@ -519,6 +782,8 @@
     cleanCommand,
     mergeSpeechSegments,
     findWakeWord,
+    encodeMonoWav,
+    createPcmAudioCapture,
     createVoiceModeController,
   };
 })(window);

@@ -20,6 +20,7 @@ const voiceAlternativesEl = document.getElementById("voiceAlternatives");
 const voiceTranscriptEl = document.getElementById("voiceTranscript");
 const voiceEngineStatusEl = document.getElementById("voiceEngineStatus");
 const voiceRestartCountEl = document.getElementById("voiceRestartCount");
+const voiceLatencyEl = document.getElementById("voiceLatency");
 const voiceActivityEl = document.getElementById("voiceActivity");
 const sendButton = document.getElementById("send");
 const sendTextEl = document.getElementById("sendText");
@@ -2106,8 +2107,8 @@ if (window.RoomVoiceMode && voiceToggleEl) {
     transcript: voiceTranscriptEl,
     engineStatus: voiceEngineStatusEl,
     restartCount: voiceRestartCountEl,
+    latency: voiceLatencyEl,
     activity: voiceActivityEl,
-    onTranscript: insertVoiceTranscript,
   });
   voiceModeController.init();
 }

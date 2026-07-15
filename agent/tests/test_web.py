@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import AsyncIterator
 
 import httpx
@@ -8,6 +9,8 @@ import pytest
 from room_agent.events import event
 from room_agent.schemas import EventPhase, LifecycleEvent
 from room_agent.web import create_app
+from room_agent.config import Settings
+import room_agent.web as web_module
 
 
 class FakeAssistant:
@@ -241,3 +244,109 @@ async def test_pending_thread_rejects_new_prompt_and_accepts_one_resume(
         "final",
     ]
     assert stale.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_endpoint_validates_and_forwards_wav(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
+    forwarded = []
+
+    async def fake_transcribe(audio: bytes, settings: Settings) -> dict:
+        forwarded.append((audio, settings.openrouter_api_key_value))
+        return {"text": "turn on the light", "upstream_latency_ms": 75, "usage": None}
+
+    monkeypatch.setattr(web_module, "_transcribe_voice_audio", fake_transcribe)
+    app = create_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/api/voice/transcribe",
+            content=b"RIFF-test-wave",
+            headers={"Content-Type": "audio/wav"},
+        )
+        unsupported = await client.post(
+            "/api/voice/transcribe",
+            content=b"not-wave",
+            headers={"Content-Type": "audio/webm"},
+        )
+        empty = await client.post(
+            "/api/voice/transcribe",
+            content=b"",
+            headers={"Content-Type": "audio/wav"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["text"] == "turn on the light"
+    assert forwarded == [(b"RIFF-test-wave", "test-openrouter-key")]
+    assert unsupported.status_code == 415
+    assert empty.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_voice_transcription_requires_server_side_key(monkeypatch) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "")
+    app = create_app()
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.post(
+            "/api/voice/transcribe",
+            content=b"RIFF-test-wave",
+            headers={"Content-Type": "audio/wav"},
+        )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "OPENROUTER_API_KEY is required"
+
+
+@pytest.mark.asyncio
+async def test_openrouter_transcription_request_uses_expected_model_and_no_language(
+    monkeypatch,
+) -> None:
+    calls = []
+
+    class FakeResponse:
+        status_code = 200
+
+        @staticmethod
+        def json() -> dict:
+            return {
+                "text": "விளக்கை ஆன் பண்ணு",
+                "usage": {"seconds": 4.2, "cost": 0.0005},
+            }
+
+    class FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            assert timeout == 12.0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            return None
+
+        async def post(self, url: str, *, headers: dict, json: dict):
+            calls.append((url, headers, json))
+            return FakeResponse()
+
+    monkeypatch.setattr(web_module.httpx, "AsyncClient", FakeClient)
+    settings = Settings(
+        OPENROUTER_API_KEY="server-secret",
+        OPENROUTER_TIMEOUT_SECONDS=12,
+    )
+
+    result = await web_module._transcribe_voice_audio(b"RIFF-wave", settings)
+
+    assert result["text"] == "விளக்கை ஆன் பண்ணு"
+    assert result["usage"] == {"seconds": 4.2, "cost": 0.0005}
+    url, headers, payload = calls[0]
+    assert url == "https://openrouter.ai/api/v1/audio/transcriptions"
+    assert headers["Authorization"] == "Bearer server-secret"
+    assert payload["model"] == "openai/gpt-4o-transcribe"
+    assert payload["temperature"] == 0
+    assert payload["input_audio"]["format"] == "wav"
+    assert base64.b64decode(payload["input_audio"]["data"]) == b"RIFF-wave"
+    assert "language" not in payload

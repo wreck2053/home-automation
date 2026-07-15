@@ -6,15 +6,15 @@
     <meta name="theme-color" content="#090d12">
     <title>Deepy Room Assistant</title>
     <link rel="stylesheet" href="/static/vendor/highlight-theme.css">
-    <link rel="stylesheet" href="/static/app.css?v=deepy-poc-6">
+    <link rel="stylesheet" href="/static/app.css?v=deepy-poc-8">
     <script src="/static/vendor/lucide.min.js" defer></script>
     <script src="/static/vendor/marked.umd.js" defer></script>
     <script src="/static/vendor/purify.min.js" defer></script>
     <script src="/static/vendor/highlight.min.js" defer></script>
     <script src="/static/markdown.js" defer></script>
     <script src="/static/tool-progress.js" defer></script>
-    <script src="/static/voice-mode.js?v=deepy-poc-6" defer></script>
-    <script src="/static/app.js?v=deepy-poc-6" defer></script>
+    <script src="/static/voice-mode.js?v=deepy-poc-16" defer></script>
+    <script src="/static/app.js?v=deepy-poc-8" defer></script>
   </head>
   <body>
     <main class="shell">
@@ -132,7 +132,7 @@
           <div>
             <span class="voice-eyebrow">Browser voice lab</span>
             <h2 id="voiceDialogTitle">Deepy Voice</h2>
-            <p>Wake-word and Tamil speech-recognition diagnostics</p>
+            <p>Browser wake-word and GPT-4o transcription diagnostics</p>
           </div>
           <button class="voice-close" id="voiceClose" type="button" aria-label="Close voice mode"><span class="button-icon" data-icon="X" aria-hidden="true"></span></button>
         </header>
@@ -154,22 +154,23 @@
 
         <div class="voice-result-grid" aria-live="polite">
           <article class="voice-result-card">
-            <header><span class="button-icon" data-icon="AudioLines" aria-hidden="true"></span><span>Browser heard</span></header>
+            <header><span class="button-icon" data-icon="AudioLines" aria-hidden="true"></span><span>Browser heard (wake only)</span></header>
             <strong id="voiceHeard">—</strong>
-            <p id="voiceAlternatives">Recognition alternatives will appear here.</p>
+            <p id="voiceAlternatives">Wake recognition alternatives will appear here.</p>
           </article>
           <article class="voice-result-card transcript-card">
             <header><span class="button-icon" data-icon="FileText" aria-hidden="true"></span><span>Command transcript</span></header>
             <strong id="voiceTranscript">—</strong>
-            <p>Final text is copied into the chat composer but never submitted automatically.</p>
+            <p>Only the GPT-4o transcription appears here; it is not copied or submitted.</p>
           </article>
         </div>
 
         <dl class="voice-meta-grid">
           <div><dt>Wake word</dt><dd>Deepy</dd></div>
-          <div><dt>Language</dt><dd>Tamil (India) · ta-IN</dd></div>
+          <div><dt>Wake language</dt><dd>English (India) · en-IN</dd></div>
           <div><dt>Engine</dt><dd id="voiceEngineStatus">Off</dd></div>
           <div><dt>Recognition restarts</dt><dd id="voiceRestartCount">0</dd></div>
+          <div><dt>Last transcription latency</dt><dd id="voiceLatency">—</dd></div>
         </dl>
 
         <section class="voice-activity-section">
@@ -181,7 +182,7 @@
           </ol>
         </section>
 
-        <p class="voice-privacy-note"><span class="button-icon" data-icon="ShieldCheck" aria-hidden="true"></span>Raw audio is not stored by this application. Chrome may use its speech service for recognition.</p>
+        <p class="voice-privacy-note"><span class="button-icon" data-icon="ShieldCheck" aria-hidden="true"></span>A short in-memory wake buffer prevents clipped commands; the audio sent to OpenRouter may include “Deepy” and is not stored by this application.</p>
       </section>
     </div>
   </body>
